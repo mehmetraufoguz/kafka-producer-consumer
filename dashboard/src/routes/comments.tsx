@@ -7,6 +7,7 @@ import { Activity } from 'lucide-react'
 
 export const Route = createFileRoute('/comments')({
   component: CommentsPage,
+  ssr: false
 })
 
 function CommentsPage() {

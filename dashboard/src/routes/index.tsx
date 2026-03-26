@@ -10,7 +10,10 @@ import { StatisticsCharts } from '#/components/StatisticsCharts'
 import { Card, CardContent, CardHeader, CardTitle } from '#/components/ui/card'
 import { Activity, TrendingUp, MessageSquare, Clock, Loader2 } from 'lucide-react'
 
-export const Route = createFileRoute('/')({ component: HomePage })
+export const Route = createFileRoute('/')({ 
+  component: HomePage,
+  ssr: false
+})
 
 function HomePage() {
   // Connect to SSE for real-time updates

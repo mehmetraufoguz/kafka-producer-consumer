@@ -29,6 +29,7 @@ export function useSSE() {
 
     eventSource.addEventListener('comment', (event: MessageEvent) => {
       try {
+        console.log(event);
         const rawComment = JSON.parse(event.data)
         // Validate and transform with schema
         const comment = processedCommentSchema.parse(rawComment)
@@ -38,12 +39,6 @@ export function useSSE() {
       } catch (err) {
         console.error('Error parsing comment event:', err)
       }
-    })
-
-    // Statistics are now computed from comments collection, no need for SSE statistics updates
-    eventSource.addEventListener('statistics', () => {
-      // Ignored - statistics computed from comments collection
-      console.log('Statistics event received (ignored - computed from collection)')
     })
 
     return () => {

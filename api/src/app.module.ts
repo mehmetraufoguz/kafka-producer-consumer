@@ -12,7 +12,7 @@ import { KafkaConsumerService } from './kafka-consumer.service'
 
 @Module({
   imports: [DatabaseModule, KafkaModule],
-  controllers: [AppController, CommentsController, StatisticsController, SseController],
-  providers: [AppService, CommentsService, SseService, KafkaConsumerService],
+  controllers: [AppController, CommentsController, StatisticsController, SseController, KafkaConsumerService],
+  providers: [AppService, CommentsService, SseService],
 })
 export class AppModule {}

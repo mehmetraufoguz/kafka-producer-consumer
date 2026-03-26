@@ -1,4 +1,4 @@
-import { Controller, Logger, Inject } from '@nestjs/common'
+import { Controller, Logger, Inject, OnModuleInit, OnModuleDestroy } from '@nestjs/common'
 import { ClientKafka, EventPattern, Payload } from '@nestjs/microservices'
 import { InjectRepository } from '@nestjs/typeorm'
 import { Repository } from 'typeorm'
@@ -7,6 +7,7 @@ import { RedisService } from './redis.service'
 import { CacheService } from './cache.service'
 import { SentimentClient } from './sentiment-client.service'
 import { KAFKA_TOPICS, RETRY_CONFIG, RawComment, CommentTag, RawCommentSchema, RetryContextSchema } from '@repo/shared'
+import { lastValueFrom } from 'rxjs'
 
 interface RetryContext {
   comment: RawComment
@@ -16,7 +17,7 @@ interface RetryContext {
 }
 
 @Controller()
-export class ConsumerService {
+export class ConsumerService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(ConsumerService.name)
   private readonly consumerId = `consumer-${Date.now()}`
 
@@ -29,11 +30,46 @@ export class ConsumerService {
     private readonly sentimentClient: SentimentClient,
   ) {}
 
+  async onModuleInit() {
+    // Subscribe to response topics (if needed for request-response pattern)
+    const topics = [
+      KAFKA_TOPICS.PROCESSED_COMMENTS,
+      KAFKA_TOPICS.RETRY_QUEUE,
+      KAFKA_TOPICS.DEAD_LETTER_QUEUE,
+    ]
+    
+    topics.forEach(topic => {
+      this.kafkaProducer.subscribeToResponseOf(topic)
+    })
+
+    try {
+      await this.kafkaProducer.connect()
+      this.logger.log('Kafka producer connected successfully')
+    } catch (error) {
+      this.logger.error(`Failed to connect Kafka producer: ${error.message}`, error.stack)
+      throw error
+    }
+  }
+
+  async onModuleDestroy() {
+    try {
+      await this.kafkaProducer.close()
+      this.logger.log('Kafka producer disconnected')
+    } catch (error) {
+      this.logger.error(`Error disconnecting Kafka producer: ${error.message}`)
+    }
+  }
+
   @EventPattern(KAFKA_TOPICS.RAW_COMMENTS)
-  async handleRawComment(@Payload() data: any): Promise<void> {
-    const parsed = RawCommentSchema.safeParse(typeof data === 'string' ? JSON.parse(data) : data)
+  async handleRawComment(@Payload() message: any): Promise<void> {
+    // @Payload() already extracts the value from Kafka message
+    let commentData = message
+    if (typeof commentData === 'string') {
+      commentData = JSON.parse(commentData)
+    }
+
+    const parsed = RawCommentSchema.safeParse(commentData)
     if (!parsed.success) {
-      this.logger.warn(`Invalid raw comment payload: ${parsed.error.message}`)
       return
     }
     const comment: RawComment = parsed.data
@@ -88,10 +124,12 @@ export class ConsumerService {
       await this.redisService.markCommentAsProcessed(comment.commentId)
 
       // Step 7: Publish to processed-comments topic
-      await this.kafkaProducer.emit(KAFKA_TOPICS.PROCESSED_COMMENTS, {
-        key: comment.commentId,
-        value: JSON.stringify(processedComment),
-      })
+      await lastValueFrom(
+        this.kafkaProducer.emit(KAFKA_TOPICS.PROCESSED_COMMENTS, {
+          key: comment.commentId,
+          value: JSON.stringify(processedComment),
+        })
+      )
 
       this.logger.log(`Successfully processed comment: ${comment.commentId.substring(0, 8)}... [${tag}]`)
     } catch (error) {
@@ -119,19 +157,27 @@ export class ConsumerService {
     }
 
     // Send to retry queue
-    await this.kafkaProducer.emit(KAFKA_TOPICS.RETRY_QUEUE, {
-      key: comment.commentId,
-      value: JSON.stringify(retryContext),
-      headers: {
-        'retry-attempt': String(attempt),
-        'scheduled-time': String(Date.now() + delay),
-      },
-    })
+    await lastValueFrom(
+      this.kafkaProducer.emit(KAFKA_TOPICS.RETRY_QUEUE, {
+        key: comment.commentId,
+        value: JSON.stringify(retryContext),
+        headers: {
+          'retry-attempt': String(attempt),
+          'scheduled-time': String(Date.now() + delay),
+        },
+      })
+    )
   }
 
   @EventPattern(KAFKA_TOPICS.RETRY_QUEUE)
-  async handleRetryQueue(@Payload() data: any): Promise<void> {
-    const parsed = RetryContextSchema.safeParse(typeof data === 'string' ? JSON.parse(data) : data)
+  async handleRetryQueue(@Payload() message: any): Promise<void> {
+    // @Payload() already extracts the value from Kafka message
+    let retryData = message
+    if (typeof retryData === 'string') {
+      retryData = JSON.parse(retryData)
+    }
+
+    const parsed = RetryContextSchema.safeParse(retryData)
     if (!parsed.success) {
       this.logger.warn(`Invalid retry payload: ${parsed.error.message}`)
       return
@@ -140,15 +186,16 @@ export class ConsumerService {
     const scheduledTime = retryContext.scheduledTime || Date.now()
     const now = Date.now()
 
-    // Wait if not yet time to retry
+    // Skip if not yet time to retry - don't block with setTimeout as it causes heartbeat timeout
     if (scheduledTime > now) {
-      const waitTime = scheduledTime - now
-      await new Promise((resolve) => setTimeout(resolve, waitTime))
+      this.logger.debug(`Retry for ${retryContext.comment.commentId} not yet due, will be reprocessed later`)
+      return
     }
 
     this.logger.debug(`Retrying comment: ${retryContext.comment.commentId} (attempt ${retryContext.attempts})`)
 
     try {
+      // @Payload() already extracts the value, so pass the comment directly
       await this.handleRawComment(retryContext.comment)
     } catch (error) {
       await this.handleRetry(retryContext.comment, retryContext.attempts + 1, error.message)
@@ -156,15 +203,17 @@ export class ConsumerService {
   }
 
   private async sendToDeadLetterQueue(comment: RawComment, errorMessage: string, attempts: number): Promise<void> {
-    await this.kafkaProducer.emit(KAFKA_TOPICS.DEAD_LETTER_QUEUE, {
-      key: comment.commentId,
-      value: JSON.stringify({
-        comment,
-        errorMessage,
-        attempts,
-        timestamp: Date.now(),
-      }),
-    })
+    await lastValueFrom(
+      this.kafkaProducer.emit(KAFKA_TOPICS.DEAD_LETTER_QUEUE, {
+        key: comment.commentId,
+        value: JSON.stringify({
+          comment,
+          errorMessage,
+          attempts,
+          timestamp: Date.now(),
+        }),
+      })
+    )
   }
 
   private calculateRetryDelay(attempt: number): number {
