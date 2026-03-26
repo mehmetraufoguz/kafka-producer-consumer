@@ -1,3 +1,56 @@
-# Hello, World!
- 
-Welcome to my docs. 
+# Kafka Restaurant Comment Analytics
+
+## Project Description
+
+This is a proof-of-concept microservices platform that demonstrates real-time sentiment analysis of restaurant comments using Apache Kafka event streaming. The system simulates collecting comments from social media platforms, processing them through a sentiment analysis service, and displaying results in a live dashboard.
+
+## Goal
+
+The goal of this PoC is to demonstrate:
+
+- **Event-driven architecture patterns** using Apache Kafka for reliable message flow
+- **Microservices communication** via Kafka topics and gRPC
+- **Real-time data processing** with deduplication and retry mechanisms
+- **Live dashboard updates** using Server-Sent Events (SSE)
+- **Edge case handling** including failures, duplicates, and rate limiting
+
+## System at a Glance
+
+The platform consists of 5 microservices working together:
+
+1. **Producer** - Generates mock restaurant comments (Twitter, Instagram, Facebook, TikTok)
+2. **Consumer** - Processes comments with deduplication and sentiment analysis
+3. **Sentiment** - gRPC service that classifies comment sentiment
+4. **API** - Serves processed data via REST and SSE
+5. **Dashboard** - React UI for real-time visualization
+
+## Technology Stack
+
+- **Message Broker**: Apache Kafka 4.0.2 (KRaft mode)
+- **Backend**: NestJS 10, TypeScript, gRPC
+- **Database**: PostgreSQL 17, Redis 7.2
+- **Frontend**: React 19, TanStack (Router/Query/Table), Zustand, Recharts
+- **Container**: Docker Compose
+
+## Quick Start
+
+```bash
+# Install dependencies
+pnpm install
+
+# Start all services
+pnpm docker:up
+
+# Access dashboard
+open http://localhost:3000
+```
+
+## Next Steps
+
+- [Getting Started](/getting-started) - Understand data flow and setup
+- [Setup Guide](/setup) - Detailed stack explanation
+- [Producer Service](/producer) - Learn how comments are generated
+- [Consumer Service](/consumer) - Understand processing pipeline
+- [Sentiment Service](/sentiment) - gRPC sentiment analysis
+- [API & SSE](/api-sse) - REST endpoints and real-time streaming
+- [Frontend](/frontend) - Dashboard and state management

@@ -1,0 +1,32 @@
+syntax = "proto3";
+
+package sentiment;
+
+service SentimentService {
+  rpc RegisterConsumer (RegisterRequest) returns (RegisterResponse);
+  rpc AnalyzeSentiment (SentimentRequest) returns (SentimentResponse);
+}
+
+message RegisterRequest {
+  string consumerName = 1;
+}
+
+message RegisterResponse {
+  string consumerId = 1;
+  int32 rateLimit = 2;
+  string message = 3;
+}
+
+message SentimentRequest {
+  string commentId = 1;
+  string text = 2;
+  string textHash = 3;
+  string consumerId = 4;
+}
+
+message SentimentResponse {
+  string commentId = 1;
+  string tag = 2;
+  int32 processingTime = 3;
+  bool cached = 4;
+}

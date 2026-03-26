@@ -1,0 +1,176 @@
+# Getting Started
+
+## Data Flow Overview
+
+The platform follows an event-driven architecture where data flows through multiple stages:
+
+```
+┌─────────────┐     ┌──────────┐     ┌──────────────┐     ┌─────────────┐
+│  Producer   │────▶│  Kafka   │────▶│   Consumer   │────▶│  Sentiment  │
+│   Service   │     │ (Topics) │     │   Service    │     │   Service   │
+└─────────────┘     └──────────┘     └──────────────┘     └─────────────┘
+                         │                   │                     │
+                         │                   │                     │
+                         │                   ▼                     │
+                         │            ┌─────────────┐              │
+                         │            │ PostgreSQL  │              │
+                         │            │  + Redis    │              │
+                         │            └─────────────┘              │
+                         │                   │                     │
+                         ▼                   ▼                     │
+                    ┌──────────┐     ┌──────────────┐             │
+                    │   API    │◀────│ Kafka Topic  │◀────────────┘
+                    │ Service  │     │(processed...)│
+                    └──────────┘     └──────────────┘
+                         │
+                         ▼ (SSE)
+                    ┌──────────┐
+                    │Dashboard │
+                    └──────────┘
+```
+
+## Stage-by-Stage Description
+
+### 1. Producer → Kafka (raw-comments)
+
+**What happens:**
+- Producer generates mock comments every 100ms-10s
+- Comments include text, source (Twitter/Instagram/etc), timestamp
+- 5% are intentional duplicates to test deduplication
+- Published to `raw-comments` Kafka topic
+
+**Why:**
+- Kafka acts as a buffer between generation and processing
+- Ensures no message loss even if consumer is down
+- Allows multiple consumers to process same data
+
+### 2. Consumer Receives Raw Comment
+
+**What happens:**
+- Consumer subscribes to `raw-comments` topic
+- Receives comment message
+- Begins processing pipeline
+
+**Why:**
+- Kafka consumer groups enable horizontal scaling
+- Each message processed exactly once per group
+
+### 3. Deduplication Check
+
+**What happens:**
+- Generate hash of comment text
+- Check Redis (3-hour TTL) if hash exists
+- Also check in-memory LRU cache (100 entries)
+- If duplicate found → discard and log
+
+**Why:**
+- Prevents processing same comment multiple times
+- Redis persists across restarts
+- LRU cache speeds up recent duplicate detection
+
+### 4. Sentiment Analysis (gRPC)
+
+**What happens:**
+- Consumer calls Sentiment service via gRPC
+- Sentiment service classifies: positive/negative/neutral/unrelated
+- Uses keyword matching (e.g., "amazing" → positive)
+- LRU cache (500 entries) speeds up repeated texts
+- 1 in 32 requests randomly fail to simulate errors
+
+**Why:**
+- gRPC is faster than REST for service-to-service
+- Caching reduces repeated analysis
+- Failure simulation tests retry mechanism
+
+### 5. Save to Database
+
+**What happens:**
+- Consumer stores comment in PostgreSQL
+- Includes: text, tag, source, timestamps, retry count
+- Also stores in Redis for deduplication
+
+**Why:**
+- PostgreSQL for persistent storage
+- Enables querying by tag, source, date range
+- Tracks retry attempts for monitoring
+
+### 6. Publish to processed-comments
+
+**What happens:**
+- Consumer publishes enriched comment to Kafka
+- Topic: `processed-comments`
+- Includes sentiment tag and processing metadata
+
+**Why:**
+- Decouples consumer from API
+- Allows other services to consume processed data
+- Event sourcing pattern
+
+### 7. API Consumes Processed Comments
+
+**What happens:**
+- API service subscribes to `processed-comments`
+- Updates in-memory statistics
+- Broadcasts via SSE to connected clients
+
+**Why:**
+- API doesn't need to poll database
+- Real-time updates to dashboard
+- Statistics calculated on-the-fly
+
+### 8. Dashboard Receives Updates
+
+**What happens:**
+- Browser maintains SSE connection to API
+- Receives two event types: `comment` and `statistics`
+- Updates Zustand stores
+- Re-renders table and charts automatically
+
+**Why:**
+- SSE simpler than WebSockets for one-way updates
+- Zustand keeps UI reactive
+- No manual polling needed
+
+## Error Handling Flow
+
+When sentiment analysis fails:
+
+```
+Consumer → Sentiment (fails)
+    ↓
+Retry with delay (1s, 2s, 4s, 8s, 16s)
+    ↓
+After 5 attempts → publish to dead-letter-queue
+    ↓
+Manual investigation required
+```
+
+## Quick Setup
+
+```bash
+# Install dependencies
+pnpm install
+
+# Start all services
+pnpm docker:up
+
+# View logs
+pnpm docker:logs
+
+# Access dashboard
+open http://localhost:3000
+```
+
+## Verify Data Flow
+
+1. **Check Producer** - Logs should show "Published comment..."
+2. **Check Consumer** - Logs show "Processing comment..." and "Saved to database"
+3. **Check API** - Visit http://localhost:3001/api/statistics
+4. **Check Dashboard** - See real-time updates at http://localhost:3000
+
+## Next Steps
+
+- [Setup Guide](/setup) - Detailed stack explanation
+- [Producer](/producer) - How comments are generated
+- [Consumer](/consumer) - Processing pipeline details
+- [API & SSE](/api-sse) - Real-time streaming

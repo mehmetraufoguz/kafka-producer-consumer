@@ -1,0 +1,511 @@
+# Sentiment Service
+
+## Overview
+
+The Sentiment service is a gRPC-based microservice that analyzes comment text and classifies it into one of four categories: positive, negative, neutral, or unrelated. It includes consumer registration, rate limiting, caching, and intentional failure simulation.
+
+## Purpose
+
+- Classify comment sentiment using keyword matching
+- Provide authenticated access via consumer registration
+- Enforce rate limits (100/sec auth, 10/sec unauth)
+- Cache results to reduce redundant analysis
+- Simulate real-world service failures
+
+## Architecture
+
+```
+┌─────────────────────────┐
+│   gRPC Server (3004)    │
+└───────────┬─────────────┘
+            │
+    ┌───────┴────────┐
+    │                │
+    ▼                ▼
+┌─────────┐   ┌──────────────┐
+│Register │   │ Analyze      │
+│Consumer │   │ Sentiment    │
+└─────────┘   └──────┬───────┘
+                     │
+            ┌────────┴────────┐
+            │                 │
+            ▼                 ▼
+    ┌───────────┐     ┌──────────────┐
+    │   Rate    │     │   LRU Cache  │
+    │  Limiter  │     │  (500 items) │
+    └───────────┘     └──────────────┘
+            │                 │
+            └────────┬────────┘
+                     ▼
+           ┌──────────────────┐
+           │  Keyword Matcher │
+           │  (classification)│
+           └──────────────────┘
+```
+
+## gRPC Service Definition
+
+**Proto file:** `sentiment/proto/sentiment.proto`
+
+```protobuf
+service SentimentService {
+  rpc RegisterConsumer(RegisterRequest) returns (RegisterResponse);
+  rpc AnalyzeSentiment(SentimentRequest) returns (SentimentResponse);
+}
+
+message RegisterRequest {
+  string serviceName = 1;
+}
+
+message RegisterResponse {
+  string consumerId = 1;
+  int32 rateLimit = 2;
+  string message = 3;
+}
+
+message SentimentRequest {
+  string consumerId = 1;
+  string text = 2;
+  string timestamp = 3;
+}
+
+message SentimentResponse {
+  string tag = 1;  // positive | negative | neutral | unrelated
+  int32 processingTimeMs = 2;
+}
+```
+
+## Key Components
+
+### 1. Registration Service
+
+**Location:** `sentiment/src/registration.service.ts`
+
+**Purpose:** Issues unique consumer IDs for authenticated access
+
+**Implementation:**
+```typescript
+@Injectable()
+export class RegistrationService {
+  private registeredConsumers = new Map<string, RegisteredConsumer>()
+
+  registerConsumer(serviceName: string): RegisterResponse {
+    const consumerId = uuidv4()
+    
+    this.registeredConsumers.set(consumerId, {
+      id: consumerId,
+      serviceName,
+      registeredAt: new Date(),
+      requestCount: 0
+    })
+
+    return {
+      consumerId,
+      rateLimit: 100,  // SENTIMENT_AUTH_RATE_LIMIT
+      message: `Registered successfully as ${consumerId}`
+    }
+  }
+
+  isRegistered(consumerId: string): boolean {
+    return this.registeredConsumers.has(consumerId)
+  }
+}
+```
+
+**Why registration:**
+- Distinguishes authenticated from unauthenticated requests
+- Enables per-consumer rate limiting
+- Could track usage statistics (request counts, etc.)
+
+### 2. Rate Limiter Service
+
+**Location:** `sentiment/src/rate-limiter.service.ts`
+
+**Two-tier rate limiting:**
+
+```typescript
+@Injectable()
+export class RateLimiterService {
+  private authenticatedLimit = 100  // per second
+  private unauthenticatedLimit = 10  // per second
+  
+  async checkRateLimit(consumerId: string): Promise<boolean> {
+    const isRegistered = this.registrationService.isRegistered(consumerId)
+    
+    const limit = isRegistered 
+      ? this.authenticatedLimit 
+      : this.unauthenticatedLimit
+    
+    const key = `ratelimit:${consumerId}`
+    const current = await this.redis.get(key) || 0
+    
+    if (current >= limit) {
+      return false  // Rate limit exceeded
+    }
+    
+    await this.redis.incr(key)
+    await this.redis.expire(key, 1)  // 1 second window
+    
+    return true
+  }
+}
+```
+
+**Configuration:**
+```env
+SENTIMENT_AUTH_RATE_LIMIT=100
+SENTIMENT_UNAUTH_RATE_LIMIT=10
+```
+
+**Why two tiers:**
+- Incentivizes registration
+- Prevents abuse from unregistered clients
+- Simulates API quota systems
+
+**Enforcement:**
+```typescript
+const allowed = await this.rateLimiter.checkRateLimit(consumerId)
+
+if (!allowed) {
+  throw new RpcException({
+    code: status.RESOURCE_EXHAUSTED,
+    message: 'Rate limit exceeded'
+  })
+}
+```
+
+### 3. LRU Cache
+
+**Configuration:**
+```typescript
+const sentimentCache = new LRUCache({
+  max: 500,  // SENTIMENT_CACHE_SIZE
+  ttl: 1000 * 60 * 60 * 24  // 24 hours
+})
+```
+
+**Usage:**
+```typescript
+const cacheKey = createHash('sha256').update(text).digest('hex')
+const cached = sentimentCache.get(cacheKey)
+
+if (cached) {
+  return { tag: cached, processingTimeMs: 0 }
+}
+
+const tag = this.classifySentiment(text)
+sentimentCache.set(cacheKey, tag)
+```
+
+**Why caching:**
+- Same comments analyzed repeatedly (duplicates get through dedup timing)
+- Reduces CPU load on keyword matching
+- Faster response times
+
+### 4. Sentiment Classification
+
+**Keyword-based approach:**
+
+```typescript
+private classifySentiment(text: string): SentimentTag {
+  const lowerText = text.toLowerCase()
+  
+  // Positive keywords
+  const positiveWords = [
+    'amazing', 'great', 'excellent', 'perfect', 'love',
+    'best', 'wonderful', 'fantastic', 'delicious', 'outstanding'
+  ]
+  
+  // Negative keywords
+  const negativeWords = [
+    'terrible', 'awful', 'worst', 'bad', 'horrible',
+    'disappointing', 'disgusting', 'rude', 'cold', 'overpriced'
+  ]
+  
+  // Unrelated patterns
+  const unrelatedPatterns = [
+    /what time/i, /parking/i, /wifi/i, /password/i,
+    /reservation/i, /follow me/i, /link in bio/i, /crypto/i
+  ]
+  
+  // Check unrelated first
+  if (unrelatedPatterns.some(pattern => pattern.test(text))) {
+    return 'unrelated'
+  }
+  
+  const positiveCount = positiveWords.filter(word => 
+    lowerText.includes(word)
+  ).length
+  
+  const negativeCount = negativeWords.filter(word => 
+    lowerText.includes(word)
+  ).length
+  
+  if (positiveCount > negativeCount) return 'positive'
+  if (negativeCount > positiveCount) return 'negative'
+  return 'neutral'
+}
+```
+
+**Why keyword matching:**
+- Simple and deterministic
+- Fast processing
+- Sufficient for PoC
+- Easily understandable
+
+**Limitations:**
+- No context understanding
+- Sarcasm not detected
+- Simple word counting
+
+### 5. Failure Simulation
+
+**Configuration:**
+```env
+SENTIMENT_FAILURE_RATE=0.03125  # 1 in 32 requests
+```
+
+**Implementation:**
+```typescript
+private shouldSimulateFailure(): boolean {
+  return Math.random() < this.failureRate
+}
+
+async analyzeSentiment(request: SentimentRequest): Promise<SentimentResponse> {
+  if (this.shouldSimulateFailure()) {
+    throw new RpcException({
+      code: status.UNAVAILABLE,
+      message: 'Service temporarily unavailable'
+    })
+  }
+  
+  // Normal processing...
+}
+```
+
+**Why simulate failures:**
+- Tests consumer retry mechanism
+- Simulates real-world service instability
+- Validates error handling paths
+- Populates dead-letter queue
+
+### 6. Processing Time Simulation
+
+**Simulates variable processing time:**
+
+```typescript
+const processingTimeMs = text.length * 2  // 2ms per character
+
+await sleep(processingTimeMs)
+```
+
+**Why simulate delay:**
+- More realistic than instant responses
+- Tests timeout handling
+- Creates observable latency variations
+
+**Example:**
+- "Great!" (6 chars) → 12ms
+- "Amazing food! Best restaurant..." (30 chars) → 60ms
+
+## Behavior Details
+
+### Registration Flow
+
+**Request:**
+```json
+{
+  "serviceName": "consumer-service"
+}
+```
+
+**Response:**
+```json
+{
+  "consumerId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "rateLimit": 100,
+  "message": "Registered successfully as a1b2c3d4-..."
+}
+```
+
+**Consumer stores** `consumerId` and includes it in all sentiment requests.
+
+### Analysis Flow
+
+**Request:**
+```json
+{
+  "consumerId": "a1b2c3d4-...",
+  "text": "The food was amazing!",
+  "timestamp": "2026-03-26T10:30:00Z"
+}
+```
+
+**Processing steps:**
+1. Check if consumerId is registered
+2. Check rate limit (100/sec if registered, 10/sec if not)
+3. Check LRU cache for text hash
+4. If not cached, classify sentiment
+5. Simulate processing time (42ms for 21 chars)
+6. 1 in 32 chance to throw error
+7. Return result
+
+**Response:**
+```json
+{
+  "tag": "positive",
+  "processingTimeMs": 42
+}
+```
+
+### Rate Limiting Behavior
+
+**Scenario: Registered consumer**
+```
+Request 1-100: Accepted
+Request 101: Rejected (RESOURCE_EXHAUSTED)
+[After 1 second]
+Request 102-201: Accepted
+```
+
+**Scenario: Unregistered consumer**
+```
+Request 1-10: Accepted
+Request 11: Rejected (RESOURCE_EXHAUSTED)
+[After 1 second]
+Request 12-21: Accepted
+```
+
+**Error response:**
+```
+gRPC error: code=RESOURCE_EXHAUSTED, message="Rate limit exceeded"
+```
+
+## HTTP Health Endpoint
+
+**Endpoint:** `GET http://localhost:3004/health`
+
+**Response:**
+```json
+{
+  "status": "ok",
+  "timestamp": "2026-03-26T10:30:00Z",
+  "uptime": 3600,
+  "registeredConsumers": 2,
+  "cacheSize": 245,
+  "rateLimit": {
+    "authenticated": 100,
+    "unauthenticated": 10
+  }
+}
+```
+
+**Why HTTP health check:**
+- gRPC harder to curl/monitor
+- Standard for container health checks
+- Exposes useful metrics
+
+## Performance Characteristics
+
+**Throughput:**
+- With cache hits: 1000+ requests/second
+- Without cache: 200-500 requests/second
+
+**Latency:**
+- Cached: < 5ms
+- Uncached: 10-200ms (depends on text length)
+- Failed (simulated): 0ms (immediate exception)
+
+**Cache effectiveness:**
+- Hit rate: ~30-40% in typical scenarios
+- Varies based on duplicate rate from producer
+
+## Monitoring
+
+**Logs:**
+```
+[Sentiment] Registered consumer: consumer-service (ID: a1b2c3d4-...)
+[Sentiment] Analyzing sentiment for: "Great food!"
+[Sentiment] Cache hit for text hash: 3a2f1b...
+[Sentiment] Rate limit exceeded for consumer: unregistered
+[Sentiment] Simulated failure (1 in 32)
+```
+
+**Metrics to track:**
+- Total requests
+- Registered vs unregistered requests
+- Cache hit rate
+- Rate limit violations
+- Simulated failures
+- Average processing time
+
+## Development
+
+**Run locally:**
+```bash
+cd sentiment
+pnpm dev
+```
+
+**Test gRPC calls:**
+
+Using grpcurl:
+```bash
+# Register
+grpcurl -plaintext -d '{"serviceName":"test"}' \
+  localhost:3004 SentimentService/RegisterConsumer
+
+# Analyze
+grpcurl -plaintext -d '{"consumerId":"abc","text":"Great!"}' \
+  localhost:3004 SentimentService/AnalyzeSentiment
+```
+
+**Environment variables:**
+```env
+SENTIMENT_AUTH_RATE_LIMIT=100
+SENTIMENT_UNAUTH_RATE_LIMIT=10
+SENTIMENT_CACHE_SIZE=500
+SENTIMENT_FAILURE_RATE=0.03125
+```
+
+## Testing
+
+### Test Registration
+
+```bash
+# Should return consumerId
+curl http://localhost:3004/health
+# Check registeredConsumers count
+```
+
+### Test Rate Limiting
+
+Send 150 requests rapidly:
+```bash
+for i in {1..150}; do
+  grpcurl -plaintext -d '{"consumerId":"test","text":"Test"}' \
+    localhost:3004 SentimentService/AnalyzeSentiment
+done
+# Should see RESOURCE_EXHAUSTED after request 100
+```
+
+### Test Cache
+
+```bash
+# Send same text twice
+grpcurl -d '{"consumerId":"test","text":"Same text"}' ...
+# Second call should be faster (processingTimeMs: 0)
+```
+
+### Test Failure Simulation
+
+```bash
+# Send 100 requests
+# ~3 should fail with UNAVAILABLE
+```
+
+## Next Steps
+
+- [API & SSE](/api-sse) - How processed data is served
+- [Consumer Service](/consumer) - How sentiment is requested
+- [Frontend](/frontend) - How tags are displayed

@@ -1,0 +1,385 @@
+# Setup Guide
+
+## Prerequisites
+
+- **Node.js 20+** and **pnpm** package manager
+- **Docker 20+** and **Docker Compose 2+**
+- 4GB+ available RAM
+- Git
+
+## Technology Stack Explained
+
+### Backend Technologies
+
+#### Apache Kafka 4.0.2 (KRaft Mode)
+
+**What it is:**
+- Distributed event streaming platform
+- Runs in KRaft mode (no Zookeeper dependency)
+
+**Why we use it:**
+- Durability: Messages persist even if services crash
+- Scalability: Can handle high throughput with partitions
+- Decoupling: Services don't need to know about each other
+- Replay capability: Can reprocess historical data
+
+**Configuration:**
+- 3 partitions per topic for parallel processing
+- Topics: `raw-comments`, `processed-comments`, `retry-queue`, `dead-letter-queue`
+- Port: 9092 (internal), 9093 (external)
+
+#### NestJS 10 with TypeScript
+
+**What it is:**
+- Progressive Node.js framework
+- Built with TypeScript, supports decorators
+
+**Why we use it:**
+- Module structure for microservices
+- Built-in Kafka integration (`@nestjs/microservices`)
+- Dependency injection
+- gRPC support
+
+**Used in:**
+- Producer service
+- Consumer service  
+- Sentiment service
+- API service
+
+#### PostgreSQL 17
+
+**What it is:**
+- Relational database
+
+**Why we use it:**
+- ACID compliance for reliable storage
+- Rich querying with SQL
+- TypeORM integration
+
+**Schema:**
+```sql
+comments (
+  id: serial,
+  commentId: varchar (UUID),
+  text: text,
+  tag: varchar (positive/negative/neutral/unrelated),
+  source: varchar (twitter/instagram/etc),
+  processedAt: timestamp,
+  retryCount: integer
+)
+```
+
+**Indexed columns:** tag, processedAt, source
+
+#### Redis 7.2
+
+**What it is:**
+- In-memory key-value store
+
+**Why we use it:**
+- Fast deduplication checks
+- 3-hour TTL for comment hashes
+- Persistence across service restarts
+
+**Data stored:**
+- Comment hash → timestamp
+- Used by consumer to detect duplicates
+
+#### gRPC with @grpc/grpc-js
+
+**What it is:**
+- High-performance RPC framework
+- Uses Protocol Buffers
+
+**Why we use it:**
+- Binary protocol (faster than JSON/REST)
+- Type safety with proto files
+- Streaming support
+
+**Used for:**
+- Consumer ↔ Sentiment communication
+- Methods: `RegisterConsumer`, `AnalyzeSentiment`
+
+### Frontend Technologies
+
+#### React 19
+
+**What it is:**
+- UI library with component model
+
+**Why we use it:**
+- Component reusability
+- Virtual DOM for performance
+- Large ecosystem
+
+#### TanStack Ecosystem
+
+**TanStack Router:**
+- Type-safe routing
+- File-based route definitions
+- Used for: `/` and `/comments` pages
+
+**TanStack Query:**
+- Data fetching and caching
+- Automatic refetching (10 second interval)
+- Used for: API calls to `/api/comments` and `/api/statistics`
+
+**TanStack Table:**
+- Headless table library
+- Features used:
+  - Column definitions with custom cells
+  - Sorting state management
+  - Filtering by tag and search query
+  - Pagination with page state
+- No batteries-included UI (we provide our own with shadcn/ui)
+
+**Implementation:**
+```tsx
+const table = useReactTable({
+  data: comments,
+  columns,
+  getCoreRowModel: getCoreRowModel(),
+  getPaginationRowModel: getPaginationRowModel(),
+  getSortedRowModel: getSortedRowModel(),
+  getFilteredRowModel: getFilteredRowModel(),
+})
+```
+
+#### Zustand
+
+**What it is:**
+- Lightweight state management
+
+**Why we use it:**
+- Simpler than Redux
+- No boilerplate
+- Works well with SSE updates
+
+**Stores:**
+- `useCommentStore`: Holds last 100 real-time comments
+- `useStatisticsStore`: Holds aggregate statistics
+
+#### Recharts
+
+**What it is:**
+- React charting library
+
+**Why we use it:**
+- Built for React
+- Composable components
+- Responsive by default
+
+**Used for:**
+- Pie chart: Sentiment distribution
+- Bar chart: Counts by tag
+
+#### shadcn/ui
+
+**What it is:**
+- Copy-paste component library (not npm package)
+- Built on Radix UI primitives
+
+**Components used:**
+- Table, Card, Badge, Button, Input
+- Custom variants for sentiment tags (positive/negative/neutral/unrelated)
+
+#### Tailwind CSS 4
+
+**What it is:**
+- Utility-first CSS framework
+
+**Why we use it:**
+- Rapid styling
+- Responsive design
+- Theme configuration
+
+### Infrastructure
+
+#### Docker & Docker Compose
+
+**What it is:**
+- Containerization platform
+
+**Why we use it:**
+- Consistent environments
+- Easy local development
+- Multi-service orchestration
+
+**Services:**
+- kafka (apache/kafka:4.0.2)
+- postgres (postgres:17)
+- redis (redis:7.2)
+- producer, consumer, sentiment, api, dashboard
+
+#### pnpm Workspaces
+
+**What it is:**
+- Monorepo package manager
+
+**Why we use it:**
+- Shared dependencies
+- Faster installs than npm
+- Workspace protocol for local packages
+
+**Structure:**
+```
+workspace (pnpm-workspace.yaml)
+├── producer/
+├── consumer/
+├── sentiment/
+├── api/
+├── dashboard/
+└── shared/ (types and constants)
+```
+
+## Installation Steps
+
+### 1. Clone Repository
+
+```bash
+git clone <repository-url>
+cd kafka-producer-consumer
+```
+
+### 2. Install Dependencies
+
+```bash
+pnpm install
+```
+
+This automatically:
+- Installs all workspace dependencies
+- Builds `@repo/shared` package via postinstall hook
+- Creates TypeScript declarations
+
+### 3. Environment Configuration (Optional)
+
+Create `.env` in root:
+
+```env
+# Kafka
+KAFKA_BROKER=localhost:9092
+
+# PostgreSQL
+POSTGRES_HOST=localhost
+POSTGRES_PORT=5432
+POSTGRES_USER=postgres
+POSTGRES_PASSWORD=postgres
+POSTGRES_DB=restaurant_comments
+
+# Redis
+REDIS_HOST=localhost
+REDIS_PORT=6379
+REDIS_TTL=10800
+
+# Producer
+PRODUCER_MIN_DELAY=100
+PRODUCER_MAX_DELAY=10000
+PRODUCER_DUPLICATE_RATE=0.05
+
+# Consumer
+CONSUMER_MAX_RETRIES=5
+CONSUMER_RETRY_DELAY=1000
+CONSUMER_CACHE_SIZE=100
+
+# Sentiment
+SENTIMENT_AUTH_RATE_LIMIT=100
+SENTIMENT_UNAUTH_RATE_LIMIT=10
+SENTIMENT_CACHE_SIZE=500
+SENTIMENT_FAILURE_RATE=0.03125
+
+# API
+API_PORT=3001
+API_CORS_ORIGIN=http://localhost:3000
+```
+
+### 4. Start Services
+
+**With Docker (Recommended):**
+```bash
+pnpm docker:up
+```
+
+**Development Mode:**
+```bash
+# Start infrastructure only
+docker compose up -d postgres redis kafka
+
+# Run migrations
+cd consumer && pnpm run migration:run && cd ..
+
+# Start all services in watch mode
+pnpm dev:all
+```
+
+## Accessing Services
+
+| Service | URL | Purpose |
+|---------|-----|---------|
+| Dashboard | http://localhost:3000 | Main UI |
+| API | http://localhost:3001 | REST endpoints |
+| API Health | http://localhost:3001/health | Health check |
+| Statistics | http://localhost:3001/api/statistics | Aggregate data |
+| SSE Stream | http://localhost:3001/api/sse/comments | Real-time events |
+| Sentiment Health | http://localhost:3004/health | gRPC service status |
+
+## Verification
+
+### 1. Check Kafka
+```bash
+docker ps | grep kafka
+# Should show kafka container running
+```
+
+### 2. Check Database
+```bash
+docker exec kafka-postgres psql -U postgres -d restaurant_comments -c "\dt"
+# Should show "comments" table
+```
+
+### 3. Check Redis
+```bash
+docker exec kafka-redis redis-cli ping
+# Should return PONG
+```
+
+### 4. Check Services
+```bash
+curl http://localhost:3001/health
+# Should return service stats
+
+curl http://localhost:3004/health
+# Should return sentiment service stats
+```
+
+### 5. Check Real-time Updates
+Open http://localhost:3000 and watch for:
+- Connection status indicator
+- Live comment count updates
+- Charts updating
+
+## Troubleshooting
+
+**Kafka not ready:**
+- Wait 60 seconds after `docker compose up`
+- Kafka needs time to initialize in KRaft mode
+
+**Database connection failed:**
+- Ensure PostgreSQL container is running
+- Run migrations: `cd consumer && pnpm run migration:run`
+
+**@repo/shared not found:**
+- Run `pnpm --filter shared build`
+- Check `shared/dist/` folder exists
+
+**Port conflicts:**
+- Ensure ports 3000, 3001, 3004, 5432, 6379, 9092 are free
+- Check with: `lsof -i :PORT_NUMBER`
+
+## Next Steps
+
+- [Producer Service](/producer) - How comments are generated
+- [Consumer Service](/consumer) - Processing pipeline
+- [Sentiment Service](/sentiment) - gRPC sentiment analysis
+- [API & SSE](/api-sse) - REST and real-time streaming
+- [Frontend](/frontend) - Dashboard architecture
