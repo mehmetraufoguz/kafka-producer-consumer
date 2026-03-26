@@ -1,7 +1,8 @@
+'use client'
+
 import { createFileRoute } from '@tanstack/react-router'
 import { CommentsTable } from '#/components/CommentsTable'
 import { useSSE } from '#/hooks/useSSE'
-import { useInitialDataLoad } from '#/hooks/useInitialDataLoad'
 import { Activity } from 'lucide-react'
 
 export const Route = createFileRoute('/comments')({
@@ -10,9 +11,6 @@ export const Route = createFileRoute('/comments')({
 
 function CommentsPage() {
   const { isConnected } = useSSE()
-  
-  // Load initial data in chunks on mount
-  useInitialDataLoad()
 
   return (
     <main className="page-wrap px-4 pb-8 pt-14">

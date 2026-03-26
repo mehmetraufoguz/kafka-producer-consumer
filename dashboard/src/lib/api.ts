@@ -1,4 +1,5 @@
 import axios from 'axios'
+import type { ProcessedComment } from './comments-collection'
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001'
 
@@ -14,18 +15,6 @@ export interface CommentTag {
   NEGATIVE: 'negative'
   NEUTRAL: 'neutral'
   UNRELATED: 'unrelated'
-}
-
-export interface ProcessedComment {
-  id: number
-  commentId: string
-  text: string
-  textHash: string
-  tag: 'positive' | 'negative' | 'neutral' | 'unrelated'
-  processedAt: string
-  consumerId: string
-  source: string
-  retryCount: number
 }
 
 export interface PaginatedResponse<T> {

@@ -1,7 +1,11 @@
+'use client'
+
 import { createFileRoute } from '@tanstack/react-router'
+import { useMemo } from 'react'
+import { useLiveQuery } from '@tanstack/react-db'
 import { useSSE } from '../hooks/useSSE'
-import { useInitialDataLoad } from '../hooks/useInitialDataLoad'
-import { useStatisticsStore } from '../stores/statistics-store'
+import { useCommentsDataLoader } from '../hooks/useCommentsDataLoader'
+import { commentsCollection } from '#/lib/comments-collection'
 import { StatisticsCharts } from '#/components/StatisticsCharts'
 import { Card, CardContent, CardHeader, CardTitle } from '#/components/ui/card'
 import { Activity, TrendingUp, MessageSquare, Clock, Loader2 } from 'lucide-react'
@@ -13,11 +17,28 @@ function HomePage() {
   const { isConnected } = useSSE()
   
   // Load initial data in chunks on mount
-  useInitialDataLoad()
+  const { isLoading } = useCommentsDataLoader()
   
-  // Use Zustand store for statistics (loaded initially and updated via SSE)
-  const statistics = useStatisticsStore((state) => state.statistics)
-  const isLoading = useStatisticsStore((state) => state.isInitialLoading)
+  // Get all comments from TanStack DB collection
+  const { data: allComments = [] } = useLiveQuery((q) => 
+    q.from({ comment: commentsCollection })
+  )
+
+  // Compute statistics from comments collection (reactive - auto-updates)
+  const statistics = useMemo(() => {
+    const hourAgo = new Date(Date.now() - 60 * 60 * 1000)
+    
+    return {
+      total: allComments.length,
+      byTag: {
+        positive: allComments.filter(c => c.tag === 'positive').length,
+        negative: allComments.filter(c => c.tag === 'negative').length,
+        neutral: allComments.filter(c => c.tag === 'neutral').length,
+        unrelated: allComments.filter(c => c.tag === 'unrelated').length,
+      },
+      recentCount: allComments.filter(c => c.processedAt >= hourAgo).length,
+    }
+  }, [allComments])
 
   return (
     <main className="page-wrap px-4 pb-8 pt-14">

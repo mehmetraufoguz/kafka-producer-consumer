@@ -1,3 +1,5 @@
+'use client'
+
 import { useMemo, useState } from 'react'
 import {
   useReactTable,
@@ -9,7 +11,9 @@ import {
   type FilterFn,
   flexRender,
 } from '@tanstack/react-table'
-import { type ProcessedComment } from '#/lib/api'
+import { useLiveQuery, eq } from '@tanstack/react-db'
+import { commentsCollection, type ProcessedComment } from '#/lib/comments-collection'
+import { useCommentsDataLoader } from '#/hooks/useCommentsDataLoader'
 import { Badge } from '#/components/ui/badge'
 import { Button } from '#/components/ui/button'
 import { Input } from '#/components/ui/input'
@@ -22,7 +26,6 @@ import {
   TableRow,
 } from '#/components/ui/table'
 import { ChevronLeft, ChevronRight, Search, Loader2 } from 'lucide-react'
-import { useCommentStore } from '#/stores/comment-store'
 
 // Simple fuzzy filter to satisfy type augmentation from demo/table.tsx
 const fuzzyFilter: FilterFn<any> = (row, columnId, value) => {
@@ -37,22 +40,32 @@ export function CommentsTable() {
   const [tagFilter, setTagFilter] = useState<string>('')
   const [searchQuery, setSearchQuery] = useState('')
 
-  // Get all comments from store
-  const allComments = useCommentStore((state) => state.comments)
-  const isInitialLoading = useCommentStore((state) => state.isInitialLoading)
-  const loadingProgress = useCommentStore((state) => state.loadingProgress)
-  const totalToLoad = useCommentStore((state) => state.totalToLoad)
+  // Load initial data in batches
+  const { isLoading: isInitialLoading, loaded: loadingProgress, total: totalToLoad } = useCommentsDataLoader()
 
-  // Client-side filtering
-  const filteredComments = useMemo(() => {
-    let filtered = [...allComments]
+  // Get all comments using live query
+  const { data: allCommentsArray = [] } = useLiveQuery((q) => 
+    q
+      .from({ comment: commentsCollection })
+      .orderBy(({ comment }) => comment.processedAt, 'desc')
+  )
 
-    // Filter by tag
+  // Get filtered comments based on tag
+  const { data: filteredByTag = [] } = useLiveQuery((q) => {
+    let query = q.from({ comment: commentsCollection })
+    
     if (tagFilter) {
-      filtered = filtered.filter(c => c.tag === tagFilter)
+      query = query.where(({ comment }) => eq(comment.tag, tagFilter))
     }
+    
+    return query.orderBy(({ comment }) => comment.processedAt, 'desc')
+  }, [tagFilter])
 
-    // Filter by search query
+  // Client-side search filtering (TanStack DB doesn't support complex text search out of box)
+  const filteredComments = useMemo(() => {
+    let filtered = tagFilter ? filteredByTag : allCommentsArray
+
+    // Filter by search query (client-side)
     if (searchQuery) {
       const query = searchQuery.toLowerCase()
       filtered = filtered.filter(c => 
@@ -62,7 +75,16 @@ export function CommentsTable() {
     }
 
     return filtered
-  }, [allComments, tagFilter, searchQuery])
+  }, [allCommentsArray, filteredByTag, tagFilter, searchQuery])
+
+  // Get counts for each tag using live queries
+  const { data: allComments = [] } = useLiveQuery((q) => 
+    q.from({ comment: commentsCollection })
+  )
+  const positiveCount = allComments.filter(c => c.tag === 'positive').length
+  const negativeCount = allComments.filter(c => c.tag === 'negative').length
+  const neutralCount = allComments.filter(c => c.tag === 'neutral').length
+  const unrelatedCount = allComments.filter(c => c.tag === 'unrelated').length
 
   const columns = useMemo<ColumnDef<ProcessedComment>[]>(
     () => [
@@ -196,28 +218,28 @@ export function CommentsTable() {
             size="sm"
             onClick={() => setTagFilter('positive')}
           >
-            Positive ({allComments.filter(c => c.tag === 'positive').length})
+            Positive ({positiveCount})
           </Button>
           <Button
             variant={tagFilter === 'negative' ? 'default' : 'outline'}
             size="sm"
             onClick={() => setTagFilter('negative')}
           >
-            Negative ({allComments.filter(c => c.tag === 'negative').length})
+            Negative ({negativeCount})
           </Button>
           <Button
             variant={tagFilter === 'neutral' ? 'default' : 'outline'}
             size="sm"
             onClick={() => setTagFilter('neutral')}
           >
-            Neutral ({allComments.filter(c => c.tag === 'neutral').length})
+            Neutral ({neutralCount})
           </Button>
           <Button
             variant={tagFilter === 'unrelated' ? 'default' : 'outline'}
             size="sm"
             onClick={() => setTagFilter('unrelated')}
           >
-            Unrelated ({allComments.filter(c => c.tag === 'unrelated').length})
+            Unrelated ({unrelatedCount})
           </Button>
         </div>
       </div>

@@ -2,7 +2,7 @@
 
 ## Overview
 
-The Dashboard is a React 19 application built with TanStack ecosystem (Router, Query, Table), Zustand for state management, and shadcn/ui components. It provides real-time visualization of restaurant comment sentiment analysis.
+The Dashboard is a React 19 application built with TanStack ecosystem (Router, DB, Table), Zustand for minimal state, and shadcn/ui components. It provides real-time visualization of restaurant comment sentiment analysis with local persistence.
 
 ## Purpose
 
@@ -10,6 +10,7 @@ The Dashboard is a React 19 application built with TanStack ecosystem (Router, Q
 - Show aggregate statistics and charts
 - Provide paginated table with filtering and search
 - Real-time updates without page refresh
+- Persist comments locally with cross-tab synchronization
 - Responsive UI with Tailwind CSS
 
 ## Architecture
@@ -21,31 +22,148 @@ The Dashboard is a React 19 application built with TanStack ecosystem (Router, Q
 └───────────┬─────────────┘
             │
        ┌────┴─────┐
-       │ SSE      │ REST
+       │ SSE      │ Batch Load (Initial)
        │          │
        ▼          ▼
-┌──────────┐  ┌──────────────┐
-│ useSSE   │  │ TanStack     │
-│ Hook     │  │ Query        │
-└────┬─────┘  └──────┬───────┘
+┌──────────┐  ┌──────────────────┐
+│ useSSE   │  │ useCommentsData  │
+│ Hook     │  │ Loader           │
+└────┬─────┘  └──────┬───────────┘
      │               │
-     ▼               ▼
-┌──────────────────────────┐
-│  Zustand Stores          │
-│  - useCommentStore       │
-│  - useStatisticsStore    │
-└───────────┬──────────────┘
-            │
-            ▼
-┌──────────────────────────┐
-│  React Components        │
-│  - CommentsTable         │
-│  - StatisticsCharts      │
-│  - Home/Comments pages   │
-└──────────────────────────┘
+     │               ▼
+     │      ┌─────────────────────────┐
+     └─────>│  TanStack DB Collection │
+            │  (localStorage backend) │
+            │  - Schema validation    │
+            │  - Auto persistence     │
+            │  - Cross-tab sync       │
+            └──────────┬──────────────┘
+                       │
+                       ▼
+            ┌─────────────────────┐
+            │  useLiveQuery       │
+            │  (Reactive queries) │
+            └──────────┬──────────┘
+                       │
+                       ▼
+            ┌──────────────────────────┐
+            │  React Components        │
+            │  - CommentsTable         │
+            │  - StatisticsCharts      │
+            │  - Home/Comments pages   │
+            └──────────────────────────┘
+
+Note: Statistics still use Zustand for simplicity
 ```
 
 ## Technology Stack
+
+### TanStack DB
+
+**Purpose:** Client-side database with reactive queries and local persistence
+
+**Why TanStack DB:**
+- Built-in localStorage persistence
+- Automatic cross-tab synchronization
+- Reactive live queries (components auto-update)
+- Schema validation with Zod
+- Type-safe queries similar to SQL
+- No manual state management needed
+
+**Collection Setup:**
+
+```typescript
+// dashboard/src/lib/comments-collection.ts
+import { createCollection } from '@tanstack/react-db'
+import { localStorageCollectionOptions } from '@tanstack/react-db'
+import { z } from 'zod'
+
+// Define schema with validation and transformations
+export const processedCommentSchema = z.object({
+  id: z.number(),
+  commentId: z.string(),
+  text: z.string(),
+  textHash: z.string(),
+  tag: z.enum(['positive', 'negative', 'neutral', 'unrelated']),
+  processedAt: z.union([z.string(), z.date()])
+    .transform(val => typeof val === 'string' ? new Date(val) : val),
+  consumerId: z.string(),
+  source: z.string(),
+  retryCount: z.number(),
+})
+
+// Create collection with localStorage backend
+export const commentsCollection = createCollection(
+  localStorageCollectionOptions({
+    id: 'processed-comments',
+    storageKey: 'kafka-dashboard-comments',
+    getKey: (item) => item.commentId,
+    schema: processedCommentSchema,
+  })
+)
+```
+
+**Key Features:**
+- **Schema Validation**: All data validated with Zod before insertion
+- **Type Transformations**: Automatically converts `processedAt` strings to Date objects
+- **Deduplication**: Uses `commentId` as unique key
+- **Persistence**: All changes auto-saved to localStorage
+- **Cross-tab Sync**: Updates in one tab appear in all tabs instantly
+
+**Usage in Components:**
+
+```tsx
+import { useLiveQuery } from '@tanstack/react-db'
+import { eq } from '@tanstack/db'
+import { commentsCollection } from '#/lib/comments-collection'
+
+function CommentsTable() {
+  // Get all comments, sorted by newest first
+  const { data: comments = [] } = useLiveQuery((q) => 
+    q
+      .from({ comment: commentsCollection })
+      .orderBy(({ comment }) => comment.processedAt, 'desc')
+  )
+
+  // Filter by tag
+  const { data: positiveComments = [] } = useLiveQuery((q) => 
+    q
+      .from({ comment: commentsCollection })
+      .where(({ comment }) => eq(comment.tag, 'positive'))
+  )
+
+  // Component automatically re-renders when data changes
+  return <div>{comments.length} comments</div>
+}
+```
+
+**Inserting Data:**
+
+```tsx
+// From SSE
+commentsCollection.insert({
+  id: 1,
+  commentId: 'abc123',
+  text: 'Great food!',
+  tag: 'positive',
+  processedAt: '2024-01-01T00:00:00Z', // Auto-converted to Date
+  consumerId: 'consumer-1',
+  source: 'twitter',
+  retryCount: 0,
+})
+
+// Batch insert during initial load
+comments.forEach(comment => {
+  commentsCollection.insert(comment)
+})
+```
+
+**Data Flow:**
+
+1. **Initial Load**: API → Batch loader → Collection → localStorage
+2. **SSE Updates**: SSE → Schema validation → Collection → localStorage → Live queries
+3. **Component Access**: Live query → Collection → Components (reactive)
+4. **Cross-tab**: Tab 1 insert → localStorage → Tab 2 storage event → Collection update
 
 ### TanStack Router
 
@@ -79,33 +197,74 @@ function RootLayout() {
 
 **No manual route configuration needed** - file structure defines routes
 
-### TanStack Query
+### Initial Data Loading
 
-**Purpose:** Data fetching, caching, and refetching
+**Purpose:** Batch load all comments from API into TanStack DB collection
 
-**Usage in CommentsTable:**
-```tsx
-const { data, isLoading } = useQuery({
-  queryKey: ['comments', currentPage, tagFilter, searchQuery],
-  queryFn: () => commentsApi.getComments({
-    page: currentPage,
-    pageSize: 20,
-    tag: tagFilter || undefined,
-    search: searchQuery || undefined
-  }),
-  refetchInterval: 10000  // Auto-refetch every 10 seconds
-})
+**Hook:** `dashboard/src/hooks/useCommentsDataLoader.ts`
+
+```typescript
+import { commentsApi } from '#/lib/api'
+import { commentsCollection } from '#/lib/comments-collection'
+
+const CHUNK_SIZE = 100 // Load 100 comments per chunk
+
+export function useCommentsDataLoader() {
+  const [progress, setProgress] = useState({
+    isLoading: false,
+    loaded: 0,
+    total: 0,
+    error: null,
+  })
+
+  useEffect(() => {
+    async function loadCommentsInBatches() {
+      // Get first chunk to determine total
+      const firstChunk = await commentsApi.getComments({
+        page: 1,
+        pageSize: CHUNK_SIZE,
+      })
+
+      // Insert into collection (auto-persists to localStorage)
+      firstChunk.data.forEach(comment => {
+        commentsCollection.insert(comment)
+      })
+
+      // Load remaining chunks in parallel (max 3 concurrent)
+      const totalPages = firstChunk.totalPages
+      const maxConcurrent = 3
+      
+      for (let i = 2; i <= totalPages; i += maxConcurrent) {
+        const chunks = await Promise.all(/* ... */)
+        
+        chunks.forEach(chunk => {
+          chunk.data.forEach(comment => {
+            commentsCollection.insert(comment)
+          })
+        })
+        
+        setProgress({ loaded, total, isLoading: true })
+      }
+    }
+
+    loadCommentsInBatches()
+  }, [])
+
+  return progress
+}
 ```
 
-**Why TanStack Query:**
-- Automatic caching by query key
-- Deduplicates requests
-- Background refetching
-- Loading/error states built-in
+**Why Batch Loading:**
+- Efficient API usage (fewer requests)
+- Progress tracking for UX
+- Data immediately available in collection
+- Persisted to localStorage for offline access
+- Only runs once per session
 
-**Query key strategy:**
-- Changes when filters change → triggers new fetch
-- `['comments', 1, 'positive', '']` vs `['comments', 1, '', '']` are different queries
+**Subsequent Visits:**
+- Comments load instantly from localStorage
+- No API call needed
+- SSE keeps data fresh
 
 ### TanStack Table
 
@@ -223,57 +382,65 @@ export function CommentsTable() {
                   header.column.columnDef.header,
                   header.getContext()
                 )}
-              </TableHead>
-            ))}
-          </TableRow>
-        ))}
-      </TableHeader>
-      <TableBody>
-        {table.getRowModel().rows.map((row) => (
-          <TableRow key={row.id}>
-            {row.getVisibleCells().map((cell) => (
-              <TableCell key={cell.id}>
-                {flexRender(
-                  cell.column.columnDef.cell,
-                  cell.getContext()
-                )}
-              </TableCell>
-            ))}
-          </TableRow>
-        ))}
-      </TableBody>
-    </Table>
-  )
-}
+    TanStack DB Collections (Primary)
+
+**For Comments:** Using TanStack DB with localStorage backend (see TanStack DB section above)
+
+**Why TanStack DB for Comments:**
+- Automatic persistence to localStorage
+- Cross-tab synchronization built-in
+- Reactive queries (no manual subscriptions)
+- Schema validation ensures data quality
+- SQL-like query syntax
+- No memory limits (uses browser storage)
+- Data survives page refresh
+- Offline support
+
+**Query Examples:**
+
+```tsx
+// Get all comments
+const { data: allComments = [] } = useLiveQuery((q) => 
+  q.from({ comment: commentsCollection })
+)
+
+// Filter by tag
+const { data: positiveComments = [] } = useLiveQuery((q) => 
+  q
+    .from({ comment: commentsCollection })
+    .where(({ comment }) => eq(comment.tag, 'positive'))
+, [])
+
+// Sort by date
+const { data: recentComments = [] } = useLiveQuery((q) => 
+  q
+    .from({ comment: commentsCollection })
+    .orderBy(({ comment }) => comment.processedAt, 'desc')
+    .limit(20)
+)
+
+// Complex query
+const { data: filteredComments = [] } = useLiveQuery((q) => {
+  let query = q.from({ comment: commentsCollection })
+  
+  if (tagFilter) {
+    query = query.where(({ comment }) => eq(comment.tag, tagFilter))
+  }
+  
+  return query.orderBy(({ comment }) => comment.processedAt, 'desc')
+}, [tagFilter])
 ```
 
-**Key TanStack Table features used:**
+**Benefits over Zustand:**
+- No manual state updates needed
+- Automatic persistence
+- Query-based access instead of selectors
+- Better for large datasets
+- Type-safe queries
 
-1. **Column Definitions** - Define data access and rendering
-2. **Core Row Model** - Basic table functionality
-3. **Pagination Row Model** - Client-side pagination
-4. **Sorted Row Model** - Client-side sorting
-5. **Filtered Row Model** - Client-side filtering
-6. **flexRender** - Renders cell content (supports JSX or functions)
+### Zustand Store (Statistics Only)
 
-**Why TanStack Table:**
-- Headless (you provide UI, it handles logic)
-- Type-safe column definitions
-- Extensible with plugins (sorting, filtering, pagination)
-- Works with any UI library (we use shadcn/ui)
-
-## State Management
-
-### Zustand Stores
-
-**Why Zustand:**
-- Simpler than Redux (no boilerplate)
-- No Context providers needed
-- Works great with SSE updates
-- TypeScript-friendly
-
-#### Comment Store
-
+**For Statistics:** Still using Zustand for simplicity
 **Location:** `dashboard/src/stores/comment-store.ts`
 
 ```typescript
@@ -335,20 +502,12 @@ export const useStatisticsStore = create<StatisticsStore>((set) => ({
 ```
 
 **Usage:**
-```tsx
-const stats = useStatisticsStore((state) => state.statistics)
-```
-
-### SSE Hook
-
-**Location:** `dashboard/src/hooks/useSSE.ts`
-
-**Purpose:** Manage Server-Sent Events connection and update stores
+```tsxinsert into TanStack DB collection
 
 ```typescript
 import { useEffect, useRef, useState } from 'react'
 import { SSE_URL } from '../lib/api'
-import { useCommentStore } from '../stores/comment-store'
+import { commentsCollection, processedCommentSchema } from '../lib/comments-collection'
 import { useStatisticsStore } from '../stores/statistics-store'
 
 export function useSSE() {
@@ -356,37 +515,35 @@ export function useSSE() {
   const [error, setError] = useState<string | null>(null)
   const eventSourceRef = useRef<EventSource | null>(null)
   
-  const addComment = useCommentStore((state) => state.addComment)
-  const setConnected = useCommentStore((state) => state.setConnected)
   const updateStatistics = useStatisticsStore((state) => state.updateStatistics)
 
   useEffect(() => {
-    // Create EventSource connection
     const eventSource = new EventSource(SSE_URL)
     eventSourceRef.current = eventSource
 
     eventSource.onopen = () => {
       console.log('SSE connection opened')
       setIsConnected(true)
-      setConnected(true)
       setError(null)
     }
 
     eventSource.onerror = (err) => {
       console.error('SSE error:', err)
       setIsConnected(false)
-      setConnected(false)
       setError('Connection lost. Retrying...')
-      // EventSource automatically reconnects
     }
 
     // Listen to 'comment' events
     eventSource.addEventListener('comment', (event: MessageEvent) => {
       try {
-        const comment = JSON.parse(event.data)
-        addComment(comment)  // Update Zustand store
+        const rawComment = JSON.parse(event.data)
+        // Validate and transform with schema
+        const comment = processedCommentSchema.parse(rawComment)
+        // Insert into collection (auto-persists to localStorage)
+        commentsCollection.insert(comment)
+        // Components using useLiveQuery automatically update
       } catch (err) {
-        console.error('Error parsing comment event:', err)
+        console.error('Error parsing/validating comment:', err)
       }
     })
 
@@ -394,14 +551,33 @@ export function useSSE() {
     eventSource.addEventListener('statistics', (event: MessageEvent) => {
       try {
         const statistics = JSON.parse(event.data)
-        updateStatistics(statistics)  // Update Zustand store
+        updateStatistics(statistics)
       } catch (err) {
         console.error('Error parsing statistics event:', err)
       }
     })
 
-    // Cleanup on unmount
     return () => {
+      eventSource.close()
+      setIsConnected(false)
+    }
+  }, [updateStatistics])
+
+  return { isConnected, error }
+}
+```
+
+**Key Changes from Zustand Version:**
+- Validates data with schema before insertion
+- Inserts into TanStack DB collection instead of Zustand store
+- Automatic persistence to localStorage
+- All components with `useLiveQuery` auto-update
+- No manual state management needed
+
+**Data Flow:**
+```
+SSE Event → JSON.parse → Schema Validation → Collection Insert → 
+localStorage → Live Query Update → Component Re-render   return () => {
       eventSource.close()
       setIsConnected(false)
       setConnected(false)
@@ -532,9 +708,9 @@ Sentiment tags are displayed using standard shadcn/ui badge variants:
 
 **Standard shadcn/ui variants used:**
 - `default` - Primary color with filled background
-- `destructive` - Red with filled background
-- `secondary` - Gray with filled background
-- `outline` - Bordered with transparent background
+- `destructive` Statistics API fetches `/api/statistics`
+- Real-time: SSE events update Zustand store
+- Comments: TanStack DB collection with live queries
 
 ## Page Structure
 
@@ -560,26 +736,39 @@ Sentiment tags are displayed using standard shadcn/ui badge variants:
 **Features:**
 - Search input (filters comment text)
 - Tag filter buttons (All, Positive, Negative, Neutral, Unrelated)
-- TanStack Table with 6 columns
-- Pagination controls
-- Live comments banner
+- TLive query automatically updates when data changes
+const { data: filteredByTag = [] } = useLiveQuery((q) => {
+  let query = q.from({ comment: commentsCollection })
+  
+  if (tagFilter) {
+    query = query.where(({ comment }) => eq(comment.tag, tagFilter))
+  }
+  
+  return query.orderBy(({ comment }) => comment.processedAt, 'desc')
+}, [tagFilter])
 
-**Filtering:**
-```tsx
-const [tagFilter, setTagFilter] = useState<string>('')
-const [searchQuery, setSearchQuery] = useState('')
+// Client-side search filtering (TanStack DB doesn't support full-text search)
+const filteredComments = useMemo(() => {
+  let filtered = tagFilter ? filteredByTag : allCommentsArray
 
-// Query updates when filters change
-const { data } = useQuery({
-  queryKey: ['comments', currentPage, tagFilter, searchQuery],
-  queryFn: () => commentsApi.getComments({
-    page: currentPage,
-    pageSize: 20,
-    tag: tagFilter || undefined,
-    search: searchQuery || undefined
-  })
-})
+  if (searchQuery) {
+    const query = searchQuery.toLowerCase()
+    filtered = filtered.filter(c => 
+      c.text.toLowerCase().includes(query) ||
+      c.commentId.toLowerCase().includes(query)
+    )
+  }
+
+  return filtered
+}, [allCommentsArray, filteredByTag, tagFilter, searchQuery])
 ```
+
+**Benefits:**
+- No API calls for filtering (data already local)
+- Instant filtering with no network lag
+- Tag filtering uses reactive live queries
+- Search filtering done client-side
+- Table updates automatically when new comments arrive via SSE
 
 **Live updates banner:**
 ```tsx
@@ -623,7 +812,9 @@ EXPOSE 3000
 
 **Tailwind CSS 4:**
 - Utility-first classes
-- Dark mode support
+- Dark modeDB localStorage caching (zero API calls after initial load)
+- Reactive queries only re-render affected components
+- Cross-tab sync via storage events (no polling)
 - Custom theme colors
 
 **Example:**
