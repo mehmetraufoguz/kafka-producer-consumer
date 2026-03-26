@@ -58,41 +58,43 @@ The platform follows an event-driven architecture where data flows through multi
 ### 3. Deduplication Check
 
 **What happens:**
-- Generate hash of comment text
-- Check Redis (3-hour TTL) if hash exists
-- Also check in-memory LRU cache (100 entries)
-- If duplicate found → discard and log
+- Check Redis using `commentId` as key (`processed:{commentId}`)
+- If found in Redis → comment already processed, discard and log
+- If not found → mark as new and continue processing
 
 **Why:**
-- Prevents processing same comment multiple times
-- Redis persists across restarts
-- LRU cache speeds up recent duplicate detection
+- Prevents processing the same comment multiple times
+- Redis persists across service restarts (3-hour TTL)
+- Uses commentId to detect duplicate submissions
 
 ### 4. Sentiment Analysis (gRPC)
 
 **What happens:**
-- Consumer calls Sentiment service via gRPC
+- Hash comment text (SHA256 of lowercase, trimmed text)
+- Check LRU cache (100 entries) for cached sentiment result
+- If cache hit → use cached tag, skip gRPC call
+- If cache miss → call Sentiment service via gRPC
 - Sentiment service classifies: positive/negative/neutral/unrelated
 - Uses keyword matching (e.g., "amazing" → positive)
-- LRU cache (500 entries) speeds up repeated texts
+- Cache the result for future identical text
 - 1 in 32 requests randomly fail to simulate errors
 
 **Why:**
+- LRU cache avoids redundant analysis for identical text
 - gRPC is faster than REST for service-to-service
-- Caching reduces repeated analysis
 - Failure simulation tests retry mechanism
 
 ### 5. Save to Database
 
 **What happens:**
 - Consumer stores comment in PostgreSQL
-- Includes: text, tag, source, timestamps, retry count
-- Also stores in Redis for deduplication
+- Includes: text, textHash, tag, source, timestamps, consumerId, retry count
+- Marks commentId as processed in Redis for deduplication
 
 **Why:**
 - PostgreSQL for persistent storage
 - Enables querying by tag, source, date range
-- Tracks retry attempts for monitoring
+- Tracks retry attempts and consumer instance for monitoring
 
 ### 6. Publish to processed-comments
 
@@ -106,17 +108,19 @@ The platform follows an event-driven architecture where data flows through multi
 - Allows other services to consume processed data
 - Event sourcing pattern
 
-### 7. API Consumes Processed Comments
+### 7. API Streams Processed Comments
 
 **What happens:**
 - API service subscribes to `processed-comments`
-- Saves comment to PostgreSQL database
-- Broadcasts comment via SSE to connected clients
+- Receives processed comment from Kafka
+- Comment is already in database (saved by Consumer)
+- Broadcasts comment via SSE to connected dashboard clients
 
 **Why:**
-- API doesn't need to poll database
-- Real-time updates to dashboard
+- API doesn't need direct database writes
+- Real-time updates to dashboard via SSE
 - Decoupled from consumer service
+- Multiple API instances can stream same data
 
 ### 8. Dashboard Receives Updates
 

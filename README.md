@@ -77,7 +77,8 @@ pnpm docker:up
 ### 🎯 Core Functionality
 
 - **Variable Speed Producer**: Generates mock comments at configurable intervals (100ms - 10s)
-- **Dual-Layer Deduplication**: Redis (3h TTL) + LRU cache (100 entries)
+- **Comment Deduplication**: Redis-based (3h TTL) prevents reprocessing duplicate comments
+- **Sentiment Result Caching**: LRU cache (100 entries) avoids redundant sentiment analysis
 - **Smart Retry Mechanism**: Exponential backoff with max 5 attempts
 - **Dead Letter Queue**: Failed messages route to DLQ for manual intervention
 - **gRPC Sentiment Analysis**: Keyword-based classification with caching

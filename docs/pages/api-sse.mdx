@@ -56,7 +56,7 @@ The API service is a hybrid NestJS application that acts as both an HTTP server 
 
 **Location:** `api/src/kafka-consumer.service.ts`
 
-**Purpose:** Listens to `processed-comments` topic and handles new messages
+**Purpose:** Listens to `processed-comments` topic and streams to SSE clients
 
 **Implementation:**
 ```typescript
@@ -64,41 +64,31 @@ The API service is a hybrid NestJS application that acts as both an HTTP server 
 export class KafkaConsumerService {
   @EventPattern(KAFKA_TOPICS.PROCESSED_COMMENTS)
   async handleProcessedComment(data: ProcessedComment) {
-    // 1. Save to database
-    await this.commentsService.saveComment(data)
-    
-    // 2. Emit SSE event for real-time update
+    // Comment is already saved by consumer service
+    // API only needs to broadcast via SSE for real-time updates
     this.sseService.emitComment(data)
   }
 }
 ```
 
 **Why Kafka consumer in API:**
-- Decouples from consumer service
-- Can process at own pace
-- Multiple consumers can read same topic
-- Event-driven updates
+- Receives processed comments for real-time streaming
+- Comments already persisted by consumer service
+- Decouples API from consumer processing
+- Multiple API instances can stream same topic
+- Event-driven updates without database polling
+
+**Note:** API does **not** re-save comments to database. The consumer service already persisted them. API's role is purely streaming via SSE for real-time dashboard updates
 
 ### 2. Comments Service
 
 **Location:** `api/src/comments.service.ts`
 
-**Database operations:**
+**Query operations:**
 
 ```typescript
 @Injectable()
 export class CommentsService {
-  async saveComment(comment: ProcessedComment): Promise<void> {
-    // Save to PostgreSQL via TypeORM
-    await this.commentRepository.save({
-      commentId: comment.commentId,
-      text: comment.text,
-      tag: comment.tag,
-      source: comment.source,
-      processedAt: comment.processedAt,
-      retryCount: comment.retryCount
-    })
-  }
 
   async getComments(options: QueryOptions): Promise<PaginatedResponse> {
     const { page = 1, pageSize = 20, tag, search } = options

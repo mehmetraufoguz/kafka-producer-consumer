@@ -137,6 +137,8 @@ Comment A (ID: abc-123, Text: "Great food!")
 Comment B (ID: abc-123, Text: "Great food!")  ← Duplicate
 ```
 
+**Note:** The current implementation reuses the `commentId` but regenerates similar text from templates. In a production system, you would store an exact text-to-ID mapping to create truly identical duplicates.
+
 ### Source Distribution
 
 **Sources:**

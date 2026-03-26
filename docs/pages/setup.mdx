@@ -58,18 +58,20 @@
 
 **Schema:**
 ```sql
-comments (
-  id: serial,
-  commentId: varchar (UUID),
+processed_comments (
+  id: serial PRIMARY KEY,
+  commentId: varchar (UUID, UNIQUE, INDEXED),
   text: text,
-  tag: varchar (positive/negative/neutral/unrelated),
-  source: varchar (twitter/instagram/etc),
-  processedAt: timestamp,
-  retryCount: integer
+  textHash: varchar(64, INDEXED),  -- SHA256 hash for sentiment caching
+  tag: varchar (positive/negative/neutral/unrelated, INDEXED),
+  source: varchar (twitter/instagram/facebook/tiktok),
+  processedAt: timestamp (INDEXED),
+  consumerId: varchar,  -- Which consumer instance processed it
+  retryCount: integer (default 0)
 )
 ```
 
-**Indexed columns:** tag, processedAt, source
+**Indexed columns:** commentId (unique), textHash, tag, processedAt
 
 #### Redis 7.2
 
