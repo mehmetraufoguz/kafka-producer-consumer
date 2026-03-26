@@ -18,12 +18,12 @@ RUN pnpm build
 # Production stage
 FROM base AS production
 ENV NODE_ENV=production
+ENV PORT=3000
 COPY --from=dependencies /app/node_modules ./node_modules
 COPY --from=dependencies /app/dashboard/node_modules ./dashboard/node_modules
-COPY --from=build /app/dashboard/dist ./dashboard/dist
+COPY --from=build /app/dashboard/.output ./dashboard/.output
 COPY dashboard/package.json ./dashboard/
-COPY dashboard/vite.config.ts ./dashboard/
 WORKDIR /app/dashboard
 
 EXPOSE 3000
-CMD ["pnpm", "preview", "--host", "0.0.0.0", "--port", "3000"]
+CMD ["pnpm", "start"]

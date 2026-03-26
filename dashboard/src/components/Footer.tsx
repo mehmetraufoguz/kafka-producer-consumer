@@ -11,7 +11,7 @@ export default function Footer() {
       </div>
       <div className="mt-4 flex justify-center gap-4">
         <a
-          href="https://github.com/rauf/kafka-producer-consumer"
+          href="https://github.com/mehmetraufoguz/kafka-producer-consumer"
           target="_blank"
           rel="noreferrer"
           className="rounded-xl p-2 text-[var(--sea-ink-soft)] transition hover:bg-[var(--link-bg-hover)] hover:text-[var(--sea-ink)]"
