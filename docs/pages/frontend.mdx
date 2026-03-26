@@ -379,7 +379,40 @@ export function CommentsTable() {
                   header.column.columnDef.header,
                   header.getContext()
                 )}
-    TanStack DB Collections (Primary)
+              </TableHead>
+            ))}
+          </TableRow>
+        ))}
+      </TableHeader>
+      <TableBody>
+        {table.getRowModel().rows.map((row) => (
+          <TableRow key={row.id}>
+            {row.getVisibleCells().map((cell) => (
+              <TableCell key={cell.id}>
+                {flexRender(
+                  cell.column.columnDef.cell,
+                  cell.getContext()
+                )}
+              </TableCell>
+            ))}
+          </TableRow>
+        ))}
+      </TableBody>
+    </Table>
+  )
+}
+```
+
+**Features:**
+- Column sorting (click headers)
+- Filtering by tag dropdown
+- Text search across comments
+- Client-side pagination
+- Responsive design
+
+## State Management
+
+### TanStack DB Collections (Primary)
 
 **For Comments:** Using TanStack DB with localStorage backend (see TanStack DB section above)
 
@@ -769,7 +802,11 @@ Sentiment tags are displayed using standard shadcn/ui badge variants:
 **Features:**
 - Search input (filters comment text)
 - Tag filter buttons (All, Positive, Negative, Neutral, Unrelated)
-- TLive query automatically updates when data changes
+- Sortable columns (click headers)
+- Real-time updates as new comments arrive
+- Pagination controls
+
+**Data Flow:**
 
 ```tsx
 const { data: filteredByTag = [] } = useLiveQuery((q) => {
