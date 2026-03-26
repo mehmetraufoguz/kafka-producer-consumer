@@ -25,7 +25,7 @@ async function bootstrap() {
   await app.startAllMicroservices()
   logger.log(`gRPC service started on port: ${grpcPort}`)
 
-  const httpPort = process.env.HTTP_PORT || 3004
+  const httpPort = parseInt(process.env.HTTP_PORT || '3005')
   await app.listen(httpPort)
   logger.log(`HTTP endpoint running on: http://localhost:${httpPort}`)
 }

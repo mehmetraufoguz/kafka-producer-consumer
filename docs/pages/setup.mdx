@@ -321,7 +321,7 @@ pnpm dev:all
 | API Health | http://localhost:3001/health | Health check |
 | Statistics | http://localhost:3001/api/statistics | Aggregate data |
 | SSE Stream | http://localhost:3001/api/sse/comments | Real-time events |
-| Sentiment Health | http://localhost:3004/health | gRPC service status |
+| Sentiment Health | http://localhost:3005/health | gRPC service status |
 
 ## Verification
 
@@ -348,7 +348,7 @@ docker exec kafka-redis redis-cli ping
 curl http://localhost:3001/health
 # Should return service stats
 
-curl http://localhost:3004/health
+curl http://localhost:3005/health
 # Should return sentiment service stats
 ```
 

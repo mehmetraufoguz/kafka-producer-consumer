@@ -7,6 +7,8 @@ WORKDIR /app
 FROM base AS dependencies
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY shared/package.json ./shared/
+COPY shared/tsconfig.json ./shared/
+COPY shared/src ./shared/src
 COPY consumer/package.json ./consumer/
 RUN pnpm install --frozen-lockfile
 
@@ -31,7 +33,7 @@ COPY --from=dependencies /app/consumer/node_modules ./consumer/node_modules
 COPY --from=build-shared /app/shared ./shared
 COPY --from=build /app/consumer/dist ./consumer/dist
 COPY consumer/package.json ./consumer/
+COPY consumer/proto ./proto
 WORKDIR /app/consumer
 
-EXPOSE 3003
 CMD ["node", "dist/main.js"]

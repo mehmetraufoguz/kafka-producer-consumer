@@ -209,7 +209,7 @@ REDIS_HOST=localhost
 
 Health endpoints:
 - API: `http://localhost:3001/health`
-- Sentiment: `http://localhost:3004/health`
+- Sentiment: `http://localhost:3005/health`
 
 Monitor: Kafka lag, rate limits, DLQ count, processing time, cache hits
 

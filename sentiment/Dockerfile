@@ -7,6 +7,8 @@ WORKDIR /app
 FROM base AS dependencies
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY shared/package.json ./shared/
+COPY shared/tsconfig.json ./shared/
+COPY shared/src ./shared/src
 COPY sentiment/package.json ./sentiment/
 RUN pnpm install --frozen-lockfile
 
@@ -34,5 +36,5 @@ COPY sentiment/package.json ./sentiment/
 COPY sentiment/proto ./sentiment/proto
 WORKDIR /app/sentiment
 
-EXPOSE 3004
+EXPOSE 3004 3005
 CMD ["node", "dist/main.js"]

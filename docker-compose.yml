@@ -53,11 +53,11 @@ services:
     volumes:
       - kafka_data:/var/lib/kafka/data
     healthcheck:
-      test: ['CMD-SHELL', 'kafka-broker-api-versions.sh --bootstrap-server localhost:9092']
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 60s
+      test: ['CMD-SHELL', '/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 || exit 1']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
 
   producer:
     build:
@@ -79,7 +79,8 @@ services:
     build:
       context: .
       dockerfile: consumer/Dockerfile
-    container_name: kafka-consumer
+    deploy:
+      replicas: 3
     environment:
       KAFKA_BROKER: kafka:9092
       KAFKA_CLIENT_ID: consumer
@@ -116,8 +117,10 @@ services:
       SENTIMENT_RATE_LIMIT: 100
       SENTIMENT_FAILURE_RATE: 0.03125
       SENTIMENT_GRPC_PORT: 3004
+      HTTP_PORT: 3005
     ports:
       - '3004:3004'
+      - '3005:3005'
     restart: unless-stopped
 
   api:
@@ -150,6 +153,7 @@ services:
       dockerfile: dashboard/Dockerfile
     container_name: kafka-dashboard
     environment:
+      PORT: 3000
       VITE_API_URL: http://localhost:3001
     ports:
       - '3000:3000'

@@ -7,6 +7,8 @@ WORKDIR /app
 FROM base AS dependencies
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY shared/package.json ./shared/
+COPY shared/tsconfig.json ./shared/
+COPY shared/src ./shared/src
 COPY api/package.json ./api/
 RUN pnpm install --frozen-lockfile
 

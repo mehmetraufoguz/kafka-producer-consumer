@@ -7,6 +7,8 @@ WORKDIR /app
 FROM base AS dependencies
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY shared/package.json ./shared/
+COPY shared/tsconfig.json ./shared/
+COPY shared/src ./shared/src
 COPY producer/package.json ./producer/
 RUN pnpm install --frozen-lockfile
 
@@ -33,5 +35,4 @@ COPY --from=build /app/producer/dist ./producer/dist
 COPY producer/package.json ./producer/
 WORKDIR /app/producer
 
-EXPOSE 3002
 CMD ["node", "dist/main.js"]

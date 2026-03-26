@@ -16,9 +16,14 @@ WORKDIR /app/dashboard
 RUN pnpm build
 
 # Production stage
-FROM nginx:alpine AS production
-COPY --from=build /app/dashboard/dist /usr/share/nginx/html
-COPY dashboard/nginx.conf /etc/nginx/conf.d/default.conf
+FROM base AS production
+ENV NODE_ENV=production
+COPY --from=dependencies /app/node_modules ./node_modules
+COPY --from=dependencies /app/dashboard/node_modules ./dashboard/node_modules
+COPY --from=build /app/dashboard/dist ./dashboard/dist
+COPY dashboard/package.json ./dashboard/
+COPY dashboard/vite.config.ts ./dashboard/
+WORKDIR /app/dashboard
 
 EXPOSE 3000
-CMD ["nginx", "-g", "daemon off;"]
+CMD ["pnpm", "preview", "--host", "0.0.0.0", "--port", "3000"]
