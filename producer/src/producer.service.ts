@@ -1,5 +1,6 @@
 import { Injectable, Inject, OnModuleInit, Logger } from '@nestjs/common'
 import { ClientKafka } from '@nestjs/microservices'
+import { Kafka } from 'kafkajs'
 import { KAFKA_TOPICS } from '@repo/shared'
 import { CommentGeneratorService } from './comment-generator.service'
 
@@ -14,11 +15,38 @@ export class ProducerService implements OnModuleInit {
   ) {}
 
   async onModuleInit() {
+    await this.ensureTopicsExist()
     await this.kafkaClient.connect()
     this.logger.log('Kafka producer connected')
     
     // Start producing after a short delay
     setTimeout(() => this.startProducing(), 2000)
+  }
+
+  private async ensureTopicsExist() {
+    const kafka = new Kafka({
+      clientId: process.env.KAFKA_CLIENT_ID || 'producer',
+      brokers: [process.env.KAFKA_BROKER || 'localhost:9092'],
+    })
+    const admin = kafka.admin()
+    try {
+      await admin.connect()
+      const topics = Object.values(KAFKA_TOPICS)
+      const existingTopics = await admin.listTopics()
+      const missingTopics = topics.filter((t) => !existingTopics.includes(t))
+      if (missingTopics.length > 0) {
+        await admin.createTopics({
+          topics: missingTopics.map((topic) => ({
+            topic,
+            numPartitions: 3,
+            replicationFactor: 1,
+          })),
+        })
+        this.logger.log(`Created Kafka topics: ${missingTopics.join(', ')}`)
+      }
+    } finally {
+      await admin.disconnect()
+    }
   }
 
   private async startProducing() {

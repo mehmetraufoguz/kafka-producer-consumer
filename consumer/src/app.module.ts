@@ -8,7 +8,7 @@ import { ConsumerService } from './consumer.service'
 
 @Module({
   imports: [DatabaseModule, KafkaModule],
-  controllers: [],
-  providers: [RedisService, CacheService, SentimentClient, ConsumerService],
+  controllers: [ConsumerService],
+  providers: [RedisService, CacheService, SentimentClient],
 })
 export class AppModule {}

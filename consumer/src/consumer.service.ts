@@ -1,20 +1,21 @@
-import { Injectable, Logger, Inject } from '@nestjs/common'
-import { ClientKafka } from '@nestjs/microservices'
+import { Controller, Logger, Inject } from '@nestjs/common'
+import { ClientKafka, EventPattern, Payload } from '@nestjs/microservices'
 import { InjectRepository } from '@nestjs/typeorm'
 import { Repository } from 'typeorm'
 import { ProcessedComment } from './entities/processed-comment.entity'
 import { RedisService } from './redis.service'
 import { CacheService } from './cache.service'
 import { SentimentClient } from './sentiment-client.service'
-import { KAFKA_TOPICS, RETRY_CONFIG, RawComment, CommentTag } from '@repo/shared'
+import { KAFKA_TOPICS, RETRY_CONFIG, RawComment, CommentTag, RawCommentSchema, RetryContextSchema } from '@repo/shared'
 
 interface RetryContext {
   comment: RawComment
   attempts: number
   lastError?: string
+  scheduledTime?: number
 }
 
-@Injectable()
+@Controller()
 export class ConsumerService {
   private readonly logger = new Logger(ConsumerService.name)
   private readonly consumerId = `consumer-${Date.now()}`
@@ -28,8 +29,14 @@ export class ConsumerService {
     private readonly sentimentClient: SentimentClient,
   ) {}
 
-  async handleRawComment(data: any): Promise<void> {
-    const comment: RawComment = JSON.parse(data.value)
+  @EventPattern(KAFKA_TOPICS.RAW_COMMENTS)
+  async handleRawComment(@Payload() data: any): Promise<void> {
+    const parsed = RawCommentSchema.safeParse(typeof data === 'string' ? JSON.parse(data) : data)
+    if (!parsed.success) {
+      this.logger.warn(`Invalid raw comment payload: ${parsed.error.message}`)
+      return
+    }
+    const comment: RawComment = parsed.data
     this.logger.debug(`Received comment: ${comment.commentId.substring(0, 8)}...`)
 
     try {
@@ -122,9 +129,15 @@ export class ConsumerService {
     })
   }
 
-  async handleRetryQueue(data: any): Promise<void> {
-    const retryContext: RetryContext = JSON.parse(data.value)
-    const scheduledTime = parseInt(data.headers['scheduled-time'])
+  @EventPattern(KAFKA_TOPICS.RETRY_QUEUE)
+  async handleRetryQueue(@Payload() data: any): Promise<void> {
+    const parsed = RetryContextSchema.safeParse(typeof data === 'string' ? JSON.parse(data) : data)
+    if (!parsed.success) {
+      this.logger.warn(`Invalid retry payload: ${parsed.error.message}`)
+      return
+    }
+    const retryContext = parsed.data
+    const scheduledTime = retryContext.scheduledTime || Date.now()
     const now = Date.now()
 
     // Wait if not yet time to retry
@@ -136,7 +149,7 @@ export class ConsumerService {
     this.logger.debug(`Retrying comment: ${retryContext.comment.commentId} (attempt ${retryContext.attempts})`)
 
     try {
-      await this.handleRawComment({ value: JSON.stringify(retryContext.comment) })
+      await this.handleRawComment(retryContext.comment)
     } catch (error) {
       await this.handleRetry(retryContext.comment, retryContext.attempts + 1, error.message)
     }

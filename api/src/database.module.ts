@@ -12,7 +12,7 @@ import { ProcessedComment } from './entities/processed-comment.entity'
       password: process.env.POSTGRES_PASSWORD || 'postgres',
       database: process.env.POSTGRES_DB || 'restaurant_comments',
       entities: [ProcessedComment],
-      synchronize: false,
+      synchronize: true,
       logging: process.env.NODE_ENV !== 'production',
     }),
     TypeOrmModule.forFeature([ProcessedComment]),
