@@ -3,6 +3,7 @@ import { defineConfig } from 'vocs'
 export default defineConfig({
   title: 'Kafka Restaurant Analytics',
   description: 'Real-time restaurant comment sentiment analysis using Kafka microservices',
+  aiCta: true,
   
   topNav: [
     { text: 'Documentation', link: '/' },
