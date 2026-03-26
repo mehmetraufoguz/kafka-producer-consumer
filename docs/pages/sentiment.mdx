@@ -72,7 +72,7 @@ service SentimentService {
 }
 
 message RegisterRequest {
-  string serviceName = 1;
+  string consumerName = 1;
 }
 
 message RegisterResponse {
@@ -82,14 +82,17 @@ message RegisterResponse {
 }
 
 message SentimentRequest {
-  string consumerId = 1;
+  string commentId = 1;
   string text = 2;
-  string timestamp = 3;
+  string textHash = 3;
+  string consumerId = 4;
 }
 
 message SentimentResponse {
-  string tag = 1;  // positive | negative | neutral | unrelated
-  int32 processingTimeMs = 2;
+  string commentId = 1;
+  string tag = 2;  // positive | negative | neutral | unrelated
+  int32 processingTime = 3;
+  bool cached = 4;
 }
 ```
 
@@ -105,27 +108,22 @@ message SentimentResponse {
 ```typescript
 @Injectable()
 export class RegistrationService {
-  private registeredConsumers = new Map<string, RegisteredConsumer>()
+  private consumers = new Map<string, RegisteredConsumer>()
 
-  registerConsumer(serviceName: string): RegisterResponse {
+  registerConsumer(consumerName: string): string {
     const consumerId = uuidv4()
     
-    this.registeredConsumers.set(consumerId, {
+    this.consumers.set(consumerId, {
       id: consumerId,
-      serviceName,
-      registeredAt: new Date(),
-      requestCount: 0
+      name: consumerName,
+      registeredAt: new Date()
     })
 
-    return {
-      consumerId,
-      rateLimit: 100,  // SENTIMENT_AUTH_RATE_LIMIT
-      message: `Registered successfully as ${consumerId}`
-    }
+    return consumerId
   }
 
   isRegistered(consumerId: string): boolean {
-    return this.registeredConsumers.has(consumerId)
+    return this.consumers.has(consumerId)
   }
 }
 ```
@@ -144,26 +142,32 @@ export class RegistrationService {
 ```typescript
 @Injectable()
 export class RateLimiterService {
-  private authenticatedLimit = 100  // per second
-  private unauthenticatedLimit = 10  // per second
+  private limits = new Map<string, RateLimitEntry>()
+  private authenticatedRateLimit = 100  // per second
+  private unauthenticatedRateLimit = 10  // per second
   
   async checkRateLimit(consumerId: string): Promise<boolean> {
+    const now = Date.now()
+    const entry = this.limits.get(consumerId)
+    
+    // Determine rate limit based on registration status
     const isRegistered = this.registrationService.isRegistered(consumerId)
+    const rateLimit = isRegistered ? this.authenticatedRateLimit : this.unauthenticatedRateLimit
     
-    const limit = isRegistered 
-      ? this.authenticatedLimit 
-      : this.unauthenticatedLimit
+    if (!entry || now > entry.resetTime) {
+      // New window
+      this.limits.set(consumerId, {
+        count: 1,
+        resetTime: now + 1000, // 1 second window
+      })
+      return true
+    }
     
-    const key = `ratelimit:${consumerId}`
-    const current = await this.redis.get(key) || 0
-    
-    if (current >= limit) {
+    if (entry.count >= rateLimit) {
       return false  // Rate limit exceeded
     }
     
-    await this.redis.incr(key)
-    await this.redis.expire(key, 1)  // 1 second window
-    
+    entry.count++
     return true
   }
 }
@@ -186,7 +190,7 @@ const allowed = await this.rateLimiter.checkRateLimit(consumerId)
 
 if (!allowed) {
   throw new RpcException({
-    code: status.RESOURCE_EXHAUSTED,
+    code: 8, // RESOURCE_EXHAUSTED
     message: 'Rate limit exceeded'
   })
 }
@@ -208,7 +212,7 @@ const cacheKey = createHash('sha256').update(text).digest('hex')
 const cached = sentimentCache.get(cacheKey)
 
 if (cached) {
-  return { tag: cached, processingTimeMs: 0 }
+  return { tag: cached, processingTime: 0, cached: true }
 }
 
 const tag = this.classifySentiment(text)
@@ -230,38 +234,53 @@ private classifySentiment(text: string): SentimentTag {
   
   // Positive keywords
   const positiveWords = [
-    'amazing', 'great', 'excellent', 'perfect', 'love',
-    'best', 'wonderful', 'fantastic', 'delicious', 'outstanding'
+    'amazing', 'best', 'love', 'perfect', 'excellent', 'great',
+    'outstanding', 'fantastic', 'wonderful', 'delicious', '😍', '❤️',
+    'recommend', 'incredible', 'awesome'
   ]
   
   // Negative keywords
   const negativeWords = [
-    'terrible', 'awful', 'worst', 'bad', 'horrible',
-    'disappointing', 'disgusting', 'rude', 'cold', 'overpriced'
+    'terrible', 'worst', 'bad', 'horrible', 'awful', 'disappointing',
+    'cold', 'tasteless', 'overpriced', 'rude', 'dirty', 'unacceptable',
+    'complaint', 'poisoning', 'waste'
   ]
   
-  // Unrelated patterns
-  const unrelatedPatterns = [
-    /what time/i, /parking/i, /wifi/i, /password/i,
-    /reservation/i, /follow me/i, /link in bio/i, /crypto/i
+  // Unrelated keywords
+  const unrelatedWords = [
+    'time', 'close', 'parking', 'blog', 'meet', 'wifi', 'password',
+    'reservation', 'online', 'gluten-free', 'follow', 'spam', 'crypto'
   ]
   
-  // Check unrelated first
-  if (unrelatedPatterns.some(pattern => pattern.test(text))) {
+  // Count matches
+  let positiveCount = 0
+  let negativeCount = 0
+  let unrelatedCount = 0
+  
+  positiveWords.forEach(word => {
+    if (lowerText.includes(word)) positiveCount++
+  })
+  
+  negativeWords.forEach(word => {
+    if (lowerText.includes(word)) negativeCount++
+  })
+  
+  unrelatedWords.forEach(word => {
+    if (lowerText.includes(word)) unrelatedCount++
+  })
+  
+  // Determine sentiment
+  if (unrelatedCount > 0) {
     return 'unrelated'
   }
   
-  const positiveCount = positiveWords.filter(word => 
-    lowerText.includes(word)
-  ).length
-  
-  const negativeCount = negativeWords.filter(word => 
-    lowerText.includes(word)
-  ).length
-  
-  if (positiveCount > negativeCount) return 'positive'
-  if (negativeCount > positiveCount) return 'negative'
-  return 'neutral'
+  if (positiveCount > negativeCount) {
+    return 'positive'
+  } else if (negativeCount > positiveCount) {
+    return 'negative'
+  } else {
+    return 'neutral'
+  }
 }
 ```
 
@@ -292,8 +311,8 @@ private shouldSimulateFailure(): boolean {
 async analyzeSentiment(request: SentimentRequest): Promise<SentimentResponse> {
   if (this.shouldSimulateFailure()) {
     throw new RpcException({
-      code: status.UNAVAILABLE,
-      message: 'Service temporarily unavailable'
+      code: 13, // INTERNAL
+      message: 'Random service failure'
     })
   }
   
@@ -312,9 +331,9 @@ async analyzeSentiment(request: SentimentRequest): Promise<SentimentResponse> {
 **Simulates variable processing time:**
 
 ```typescript
-const processingTimeMs = text.length * 2  // 2ms per character
+const processingTime = text.length * 2  // 2ms per character
 
-await sleep(processingTimeMs)
+await sleep(processingTime)
 ```
 
 **Why simulate delay:**
@@ -333,7 +352,7 @@ await sleep(processingTimeMs)
 **Request:**
 ```json
 {
-  "serviceName": "consumer-service"
+  "consumerName": "consumer-service"
 }
 ```
 
@@ -342,7 +361,7 @@ await sleep(processingTimeMs)
 {
   "consumerId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
   "rateLimit": 100,
-  "message": "Registered successfully as a1b2c3d4-..."
+  "message": "Successfully registered consumer: consumer-service"
 }
 ```
 
@@ -353,26 +372,29 @@ await sleep(processingTimeMs)
 **Request:**
 ```json
 {
-  "consumerId": "a1b2c3d4-...",
+  "commentId": "abc-123",
   "text": "The food was amazing!",
-  "timestamp": "2026-03-26T10:30:00Z"
+  "textHash": "3a2f1b...",
+  "consumerId": "a1b2c3d4-..."
 }
 ```
 
 **Processing steps:**
 1. Check if consumerId is registered
 2. Check rate limit (100/sec if registered, 10/sec if not)
-3. Check LRU cache for text hash
-4. If not cached, classify sentiment
-5. Simulate processing time (42ms for 21 chars)
-6. 1 in 32 chance to throw error
-7. Return result
+3. 1 in 32 chance to throw error (failure simulation)
+4. Check LRU cache for textHash
+5. If not cached, classify sentiment using keyword matching
+6. Simulate processing time (text.length * 2ms)
+7. Cache result and return
 
 **Response:**
 ```json
 {
+  "commentId": "abc-123",
   "tag": "positive",
-  "processingTimeMs": 42
+  "processingTime": 42,
+  "cached": false
 }
 ```
 
@@ -420,13 +442,12 @@ The sentiment service runs both HTTP and gRPC servers simultaneously on differen
   "service": "sentiment-grpc",
   "cache": {
     "size": 245,
-    "maxSize": 500,
-    "hitRate": 0.38
+    "maxSize": 500
   },
   "rateLimiter": {
-    "authenticatedLimit": 100,
-    "unauthenticatedLimit": 10,
-    "activeConsumers": 3
+    "activeConsumers": 3,
+    "authenticatedRateLimit": 100,
+    "unauthenticatedRateLimit": 10
   },
   "registration": {
     "totalRegistered": 2,
@@ -443,8 +464,8 @@ The sentiment service runs both HTTP and gRPC servers simultaneously on differen
 ```
 
 **Aggregated Metrics:**
-- **Cache stats**: Current size, capacity, hit rate
-- **Rate limiter stats**: Active limits, consumer count
+- **Cache stats**: Current size and capacity
+- **Rate limiter stats**: Active consumer count and limits
 - **Registration stats**: All registered consumers with timestamps
 - **Service status**: Overall health indicator
 
@@ -530,11 +551,11 @@ pnpm dev
 Using grpcurl:
 ```bash
 # Register
-grpcurl -plaintext -d '{"serviceName":"test"}' \
+grpcurl -plaintext -d '{"consumerName":"test"}' \
   localhost:3004 SentimentService/RegisterConsumer
 
 # Analyze
-grpcurl -plaintext -d '{"consumerId":"abc","text":"Great!"}' \
+grpcurl -plaintext -d '{"commentId":"abc","text":"Great!","textHash":"def","consumerId":"xyz"}' \
   localhost:3004 SentimentService/AnalyzeSentiment
 ```
 
@@ -553,7 +574,7 @@ SENTIMENT_FAILURE_RATE=0.03125
 ```bash
 # Should return consumerId
 curl http://localhost:3005/health
-# Check registeredConsumers count
+# Check totalRegistered count
 ```
 
 ### Test Rate Limiting
@@ -571,8 +592,8 @@ done
 
 ```bash
 # Send same text twice
-grpcurl -d '{"consumerId":"test","text":"Same text"}' ...
-# Second call should be faster (processingTimeMs: 0)
+grpcurl -d '{"commentId":"test","text":"Same text","textHash":"abc","consumerId":"xyz"}' ...
+# Second call should be faster (processingTime: 0, cached: true)
 ```
 
 ### Test Failure Simulation

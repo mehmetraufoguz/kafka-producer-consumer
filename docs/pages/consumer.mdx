@@ -7,7 +7,8 @@ The Consumer service is the core processing engine that receives raw comments fr
 ## Purpose
 
 - Process raw comments from `raw-comments` topic
-- Eliminate duplicates using Redis and LRU caching
+- Eliminate duplicates using Redis (by commentId)
+- Cache sentiment results using LRU (by textHash)
 - Enrich comments with sentiment tags via gRPC
 - Store processed comments in PostgreSQL
 - Publish enriched data to `processed-comments` topic
@@ -23,13 +24,13 @@ The Consumer service is the core processing engine that receives raw comments fr
             ▼
 ┌─────────────────────────┐
 │  Deduplication Check    │
-│  (Redis + LRU)          │
+│  (Redis by commentId)   │
 └───────────┬─────────────┘
             │
             ▼
 ┌─────────────────────────┐
 │  Sentiment gRPC Call    │
-│  (with cache)           │
+│  (LRU cache by textHash)│
 └───────────┬─────────────┘
             │
             ▼
@@ -61,34 +62,34 @@ The Consumer service is the core processing engine that receives raw comments fr
 **Implementation:**
 ```typescript
 async isCommentProcessed(commentId: string): Promise<boolean> {
-  const key = `processed:${commentId}`
+  const key = REDIS_KEYS.PROCESSED_COMMENT(commentId)
   const exists = await this.client.exists(key)
   return exists === 1
 }
 
 async markCommentAsProcessed(commentId: string): Promise<void> {
-  const key = `processed:${commentId}`
-  const ttl = process.env.REDIS_TTL || 10800  // 3 hours
+  const key = REDIS_KEYS.PROCESSED_COMMENT(commentId)
+  const ttl = parseInt(process.env.REDIS_TTL || String(CACHE_CONFIG.REDIS_TTL_SECONDS))
   await this.client.setex(key, ttl, '1')
 }
 ```
 
 **Configuration:**
 ```env
-REDIS_TTL=10800  # 3 hours (10,800 seconds)
+REDIS_TTL=10800  # 3 hours (default from CACHE_CONFIG.REDIS_TTL_SECONDS)
 ```
 
 **How it works:**
-- Uses `commentId` (not text) as deduplication key
+- Uses `commentId` as deduplication key
 - Key format: `processed:{commentId}`
 - If comment ID exists in Redis → skip processing
 - If not found → mark as processed and continue
 - 3-hour TTL balances memory usage vs duplicate window
 
 **Why commentId instead of text hash:**
-- Same comment may be submitted multiple times (5% in producer)
-- Text hash would allow duplicate comments with different IDs
-- commentId is the source system's unique identifier
+- commentId is the unique identifier from the source system
+- Text hash would cause different comments with identical text to be incorrectly deduplicated
+- Redis tracks which specific comments have been processed
 
 ### 1.5. Sentiment Result Caching (LRU)
 
@@ -152,7 +153,7 @@ const textHashCache = new LRUCache({
 async onModuleInit() {
   try {
     const { consumerId } = await this.grpcService.RegisterConsumer({
-      serviceName: 'consumer-service'
+      consumerName: 'consumer-service'
     })
     
     this.consumerId = consumerId
@@ -166,16 +167,26 @@ async onModuleInit() {
 
 **Sentiment Analysis Call:**
 ```typescript
-async analyzeSentiment(text: string): Promise<SentimentTag> {
-  const response = await this.grpcService.AnalyzeSentiment({
+async analyzeSentiment(request: SentimentRequest): Promise<SentimentResponse> {
+  const enrichedRequest = {
+    ...request,
     consumerId: this.consumerId,
-    text: text,
-    timestamp: new Date().toISOString()
-  })
+  }
   
-  return response.tag  // positive | negative | neutral | unrelated
+  return new Promise((resolve, reject) => {
+    this.client.AnalyzeSentiment(enrichedRequest, (error, response) => {
+      if (error) reject(error)
+      else resolve(response)
+    })
+  })
 }
 ```
+
+**Request fields:**
+- `commentId`: Unique comment identifier
+- `text`: Comment text to analyze
+- `textHash`: SHA256 hash of normalized text
+- `consumerId`: Consumer's registered ID (auto-added)
 
 **Rate Limits:**
 - **Registered (has consumerId):** 100 requests/second
@@ -192,7 +203,7 @@ async analyzeSentiment(text: string): Promise<SentimentTag> {
 async onModuleInit() {
   try {
     const { consumerId } = await this.grpcService.RegisterConsumer({
-      serviceName: 'consumer-service'
+      consumerName: 'consumer-service'
     })
     
     this.consumerId = consumerId
@@ -229,7 +240,8 @@ CONSUMER_RETRY_DELAY=1000  # Base delay in ms
 
 **Exponential Backoff:**
 ```
-Initial attempt: Immediate (no delay)
+Initial attempt: Immediate processing
+On failure: Publish to retry-queue with scheduled time
 Retry attempt 1: 1s delay (1000ms * 2^0)
 Retry attempt 2: 2s delay (1000ms * 2^1)
 Retry attempt 3: 4s delay (1000ms * 2^2)
@@ -242,20 +254,47 @@ After max retries: → Dead Letter Queue
 
 **Implementation:**
 ```typescript
-async processWithRetry(comment: RawComment, retryCount = 0): Promise<void> {
-  try {
-    const tag = await this.sentimentClient.analyzeSentiment(comment.text)
-    await this.saveToDatabase({ ...comment, tag, retryCount })
-    await this.publishProcessed({ ...comment, tag })
-  } catch (error) {
-    if (retryCount < MAX_RETRIES) {
-      const delay = RETRY_DELAY * Math.pow(2, retryCount)
-      await sleep(delay)
-      return this.processWithRetry(comment, retryCount + 1)
-    } else {
-      await this.publishToDeadLetterQueue(comment, error)
-    }
+private async handleRetry(comment: RawComment, attempt: number, errorMessage: string): Promise<void> {
+  const maxRetries = parseInt(process.env.CONSUMER_MAX_RETRIES || String(RETRY_CONFIG.MAX_ATTEMPTS))
+
+  if (attempt >= maxRetries) {
+    await this.sendToDeadLetterQueue(comment, errorMessage, attempt)
+    return
   }
+
+  const delay = this.calculateRetryDelay(attempt)
+  
+  const retryContext: RetryContext = {
+    comment,
+    attempts: attempt,
+    lastError: errorMessage,
+  }
+
+  // Send to retry queue with scheduled time
+  await lastValueFrom(
+    this.kafkaProducer.emit(KAFKA_TOPICS.RETRY_QUEUE, {
+      key: comment.commentId,
+      value: JSON.stringify(retryContext),
+      headers: {
+        'retry-attempt': String(attempt),
+        'scheduled-time': String(Date.now() + delay),
+      },
+    })
+  )
+}
+
+@EventPattern(KAFKA_TOPICS.RETRY_QUEUE)
+async handleRetryQueue(@Payload() message: any): Promise<void> {
+  const retryContext = RetryContextSchema.parse(message)
+  const scheduledTime = retryContext.scheduledTime || Date.now()
+  
+  // Skip if not yet time to retry
+  if (scheduledTime > Date.now()) {
+    return
+  }
+  
+  // Process the retry
+  await this.handleRawComment(retryContext.comment)
 }
 ```
 
@@ -280,16 +319,22 @@ export class ProcessedComment {
   @Column()
   text: string
 
-  @Column({ type: 'varchar', length: 64 })
+  @Column()
+  @Index()
   textHash: string  // SHA256 hash for sentiment caching
 
-  @Column({ type: 'enum', enum: ['positive', 'negative', 'neutral', 'unrelated'] })
-  tag: string
+  @Column({
+    type: 'enum',
+    enum: CommentTag,
+  })
+  @Index()
+  tag: CommentTag
 
   @Column()
   source: string
 
-  @Column({ type: 'timestamp' })
+  @CreateDateColumn()
+  @Index()
   processedAt: Date
 
   @Column()
@@ -340,24 +385,40 @@ export class ProcessedComment {
    ```
 
 2. **Check if duplicate**
-   - Hash text: `sha256("Great food!")` → `3a2f1b...`
-   - Check LRU cache for hash
-   - Check Redis for hash
+   - Check Redis for commentId `processed:abc-123`
    - If found: Log "Duplicate detected" and skip
+   - If not found: Mark as processed and continue
 
-3. **Call Sentiment service**
+3. **Hash text and check LRU cache**
+   - Hash text: `sha256("great food!")` → `3a2f1b...`
+   - Check LRU cache for this textHash
+   - If cached: Use cached tag, skip gRPC
+   - If not cached: Continue to step 4
+
+4. **Call Sentiment service**
    ```typescript
-   const tag = await sentimentClient.analyzeSentiment("Great food!")
-   // Returns: "positive"
+   const response = await sentimentClient.analyzeSentiment({
+     commentId: 'abc-123',
+     text: 'Great food!',
+     textHash: '3a2f1b...',
+     consumerId: this.consumerId
+   })
+   // response.tag: "positive"
+   // Cache the result for future use
    ```
 
-4. **Save to database**
+5. **Save to database**
    ```sql
-   INSERT INTO comments (commentId, text, tag, source, processedAt, retryCount)
-   VALUES ('abc-123', 'Great food!', 'positive', 'twitter', NOW(), 0)
+   INSERT INTO processed_comments (commentId, text, textHash, tag, source, processedAt, consumerId, retryCount)
+   VALUES ('abc-123', 'Great food!', '3a2f1b...', 'positive', 'twitter', NOW(), 'consumer-123', 0)
    ```
 
-5. **Publish to processed-comments**
+6. **Mark as processed in Redis**
+   ```typescript
+   await redisService.markCommentAsProcessed('abc-123')
+   ```
+
+7. **Publish to processed-comments**
    ```json
    {
      "commentId": "abc-123",
@@ -409,20 +470,26 @@ Attempt 2: Database save succeeds
 
 ```typescript
 async function bootstrap() {
-  const app = await NestJS.createMicroservice<MicroserviceOptions>({
+  const app = await NestFactory.createMicroservice<MicroserviceOptions>(AppModule, {
     transport: Transport.KAFKA,
     options: {
       client: {
-        brokers: [KAFKA_BROKER]
+        clientId: process.env.KAFKA_CLIENT_ID || 'consumer',
+        brokers: [process.env.KAFKA_BROKER || 'localhost:9092'],
       },
       consumer: {
-        groupId: 'restaurant-comments-consumer'
-      }
-    }
+        groupId: KAFKA_CONSUMER_GROUPS.CONSUMER,
+        sessionTimeout: 30000,
+        heartbeatInterval: 3000,
+      },
+      subscribe: {
+        fromBeginning: true, // Process all messages from beginning
+      },
+    },
   })
   
   await app.listen()
-  // No HTTP server
+  // No HTTP server - standalone Kafka microservice
 }
 ```
 
@@ -449,13 +516,12 @@ async function bootstrap() {
 
 **Logs to watch:**
 ```
-[Consumer] Processing comment: abc-123
-[Consumer] Duplicate detected: def-456 (skipped)
-[Consumer] Sentiment analysis: positive (took 125ms)
-[Consumer] Saved to database: abc-123
-[Consumer] Published to processed-comments: abc-123
-[Consumer] Retry attempt 3/5: ghi-789
-[Consumer] Moved to DLQ: jkl-012 (max retries exceeded)
+[ConsumerService] Received comment: abc-123...
+[ConsumerService] Comment abc-123 already processed, skipping
+[ConsumerService] Using cached sentiment for hash: 3a2f1b...
+[SentimentClient] Analyzed sentiment for: abc-123... [positive] in 125ms
+[ConsumerService] Successfully processed comment: abc-123... [positive]
+[ConsumerService] Max retries reached for comment ghi-789, sending to DLQ
 ```
 
 **Metrics:**
@@ -474,16 +540,15 @@ cd consumer
 pnpm dev
 ```
 
-**Run migrations:**
-```bash
-cd consumer
-pnpm run migration:run
-```
-
-**Create new migration:**
-```bash
-cd consumer
-pnpm run migration:create AddIndexToComments
+**Environment variables:**
+```env
+KAFKA_BROKER=localhost:9092
+KAFKA_CLIENT_ID=consumer
+REDIS_HOST=localhost
+REDIS_PORT=6379
+REDIS_TTL=10800
+CONSUMER_MAX_RETRIES=5
+CONSUMER_CACHE_SIZE=100
 ```
 
 ## Testing
@@ -508,7 +573,7 @@ docker logs -f kafka-consumer
 
 # Query database
 docker exec kafka-postgres psql -U postgres -d restaurant_comments \
-  -c "SELECT * FROM comments ORDER BY processedAt DESC LIMIT 5"
+  -c "SELECT * FROM processed_comments ORDER BY processedAt DESC LIMIT 5"
 
 # Check processed-comments topic
 docker exec -it kafka-broker kafka-console-consumer.sh \

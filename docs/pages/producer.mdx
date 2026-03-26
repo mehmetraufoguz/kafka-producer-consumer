@@ -88,7 +88,7 @@ generateComment(): RawComment {
     const source = pickRandom(['twitter', 'instagram', 'facebook', 'tiktok'])
   }
   
-  return { commentId, text, source, timestamp: new Date() }
+  return { commentId, text, source, timestamp: Date.now() }
 }
 ```
 
@@ -164,10 +164,12 @@ Some templates include placeholders:
 
 **Filled with:**
 - "pasta"
-- "burger"
 - "steak"
-- "salad"
+- "salmon"
+- "burger"
 - "pizza"
+- "salad"
+- "risotto"
 
 **Result:**
 ```
@@ -184,7 +186,7 @@ interface RawComment {
   commentId: string      // UUID v4
   text: string          // Filled template
   source: string        // twitter | instagram | facebook | tiktok
-  timestamp: Date       // Generation time
+  timestamp: number     // Milliseconds since epoch (Date.now())
 }
 ```
 
@@ -194,7 +196,7 @@ interface RawComment {
   "commentId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
   "text": "Amazing food! Best restaurant in town! 😍",
   "source": "instagram",
-  "timestamp": "2026-03-26T10:30:45.123Z"
+  "timestamp": 1742985045123
 }
 ```
 
@@ -204,7 +206,7 @@ interface RawComment {
 
 ```typescript
 async function bootstrap() {
-  const app = await NestJS.createApplicationContext(AppModule)
+  const app = await NestFactory.createApplicationContext(AppModule)
   
   // No HTTP server - purely Kafka producer
   // Runs until SIGTERM/SIGINT
@@ -222,8 +224,8 @@ async function bootstrap() {
 
 **Logs:**
 ```
-[Producer] Published comment: abc-123 (twitter)
-[Producer] Published comment: def-456 (instagram) [DUPLICATE]
+[Producer] Produced comment: abc123de...
+[Producer] Produced comment: def456ab...
 ```
 
 **Metrics tracked:**

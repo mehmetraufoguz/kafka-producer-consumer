@@ -2,7 +2,7 @@
 
 ## Overview
 
-The API service is a hybrid NestJS application that acts as both an HTTP server (REST endpoints) and a Kafka consumer. It consumes processed comments from Kafka, stores them in PostgreSQL, serves them via REST API, and broadcasts new comments in real-time using Server-Sent Events (SSE).
+The API service is a hybrid NestJS application that acts as both an HTTP server (REST endpoints) and a Kafka consumer. It consumes processed comments from Kafka, reads existing comments from PostgreSQL (populated by consumer service), serves them via REST API, and broadcasts new comments in real-time using Server-Sent Events (SSE).
 
 ## Purpose
 
@@ -26,26 +26,24 @@ The API service is a hybrid NestJS application that acts as both an HTTP server 
 │  Service             │
 └──────────┬───────────┘
            │
-     ┌─────┴──────┐
-     │            │
-     ▼            ▼
-┌─────────┐  ┌─────────┐
-│Database │  │   SSE   │
-│ Service │  │ Service │
-└─────┬───┘  └────┬────┘
-      │           │
-      │           ▼
-      │    ┌────────────┐
-      │    │ Subject    │
-      │    │ (RxJS)     │
-      │    └────┬───────┘
-      │         │
-      ▼         ▼
-┌─────────────────────┐
-│  HTTP Endpoints     │
-│  - GET /api/comments│
-│  - GET /api/stats   │
-│  - GET /api/sse/... │
+           ▼
+     ┌─────────┐
+     │   SSE   │
+     │ Service │
+     └────┬────┘
+          │
+          ▼
+   ┌────────────┐
+   │ Subject    │
+   │ (RxJS)     │
+   └────┬───────┘
+        │
+        ▼
+┌─────────────────────┐       ┌──────────────┐
+│  HTTP Endpoints     │◄──────┤  PostgreSQL  │
+│  - GET /api/comments│ reads │  (populated  │
+│  - GET /api/stats   │       │  by consumer)│
+│  - GET /api/sse/... │       └──────────────┘
 │  - GET /health      │
 └─────────────────────┘
 ```
@@ -90,65 +88,76 @@ export class KafkaConsumerService {
 @Injectable()
 export class CommentsService {
 
-  async getComments(options: QueryOptions): Promise<PaginatedResponse> {
-    const { page = 1, pageSize = 20, tag, search } = options
-    
-    const query = this.commentRepository
-      .createQueryBuilder('comment')
-      .orderBy('comment.processedAt', 'DESC')
-    
-    // Filter by tag if provided
-    if (tag) {
-      query.andWhere('comment.tag = :tag', { tag })
-    }
-    
-    // Filter by search text if provided
-    if (search) {
-      query.andWhere('comment.text ILIKE :search', { 
-        search: `%${search}%` 
-      })
-    }
-    
-    // Pagination
+  async findAll(
+    page: number = 1,
+    pageSize: number = 20,
+    tag?: CommentTag,
+    search?: string,
+  ): Promise<PaginatedResponse<ProcessedComment>> {
     const skip = (page - 1) * pageSize
-    query.skip(skip).take(pageSize)
-    
-    const [data, total] = await query.getManyAndCount()
-    
+
+    const where: FindOptionsWhere<ProcessedComment> = {}
+
+    if (tag) {
+      where.tag = tag
+    }
+
+    if (search) {
+      where.text = ILike(`%${search}%`)
+    }
+
+    const [data, total] = await this.commentRepository.findAndCount({
+      where,
+      skip,
+      take: pageSize,
+      order: {
+        processedAt: 'DESC',
+      },
+    })
+
     return {
       data,
       total,
       page,
       pageSize,
-      totalPages: Math.ceil(total / pageSize)
+      totalPages: Math.ceil(total / pageSize),
     }
   }
 
   async getStatistics(): Promise<CommentStatistics> {
-    const all = await this.commentRepository.find()
-    
-    // Calculate totals by tag
-    const byTag = all.reduce((acc, comment) => {
-      acc[comment.tag] = (acc[comment.tag] || 0) + 1
-      return acc
-    }, {
-      positive: 0,
-      negative: 0,
-      neutral: 0,
-      unrelated: 0
-    })
-    
-    // Last hour count
-    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000)
-    const lastHour = await this.commentRepository
+    const total = await this.commentRepository.count()
+
+    // Get counts by tag
+    const tagCounts = await this.commentRepository
       .createQueryBuilder('comment')
-      .where('comment.processedAt >= :oneHourAgo', { oneHourAgo })
-      .getCount()
-    
+      .select('comment.tag', 'tag')
+      .addSelect('COUNT(*)', 'count')
+      .groupBy('comment.tag')
+      .getRawMany()
+
+    const byTag = {
+      [CommentTag.POSITIVE]: 0,
+      [CommentTag.NEGATIVE]: 0,
+      [CommentTag.NEUTRAL]: 0,
+      [CommentTag.UNRELATED]: 0,
+    }
+
+    tagCounts.forEach((row) => {
+      byTag[row.tag as CommentTag] = parseInt(row.count)
+    })
+
+    // Get recent count (last hour)
+    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000)
+    const recentCount = await this.commentRepository.count({
+      where: {
+        processedAt: new Date(oneHourAgo.getTime()),
+      },
+    })
+
     return {
-      total: all.length,
+      total,
       byTag,
-      lastHour
+      recentCount,
     }
   }
 }
@@ -163,19 +172,32 @@ export class CommentsService {
 **Implementation using RxJS:**
 
 ```typescript
-@Injectable()
-export class SSEService {
-  private readonly eventSubject = new Subject<MessageEvent>()
+interface SseEvent {
+  data: any
+  type?: string
+}
 
-  getEventStream(): Observable<MessageEvent> {
-    return this.eventSubject.asObservable()
+@Injectable()
+export class SseService {
+  private readonly commentSubject = new Subject<ProcessedComment>()
+  private readonly commentStream$: Observable<SseEvent>
+
+  constructor() {
+    this.commentStream$ = this.commentSubject.asObservable().pipe(
+      map((comment) => ({
+        data: comment,
+        type: 'comment',
+      })),
+      share()
+    )
+  }
+
+  getCommentStream(): Observable<SseEvent> {
+    return this.commentStream$
   }
 
   emitComment(comment: ProcessedComment): void {
-    this.eventSubject.next({
-      type: 'comment',
-      data: JSON.stringify(comment)
-    })
+    this.commentSubject.next(comment)
   }
 }
 ```
@@ -213,9 +235,11 @@ GET /api/comments?page=2&pageSize=10&tag=positive&search=food
       "id": 123,
       "commentId": "abc-123",
       "text": "Amazing food!",
+      "textHash": "3a2f1b4e...",
       "tag": "positive",
       "source": "instagram",
-      "processedAt": "2026-03-26T10:30:00Z",
+      "processedAt": "2026-03-26T10:30:00.000Z",
+      "consumerId": "consumer-1234567890",
       "retryCount": 0
     }
   ],
@@ -242,7 +266,7 @@ GET /api/comments?page=2&pageSize=10&tag=positive&search=food
     "neutral": 789,
     "unrelated": 155
   },
-  "lastHour": 234
+  "recentCount": 234
 }
 ```
 
@@ -265,14 +289,19 @@ data: {"commentId":"def-456","text":"Terrible!","tag":"negative",...}
 **Implementation:**
 ```typescript
 @Controller('api/sse')
-export class SSEController {
-  @Get('comments')
-  streamComments(@Res() res: Response): Observable<MessageEvent> {
-    res.setHeader('Content-Type', 'text/event-stream')
-    res.setHeader('Cache-Control', 'no-cache')
-    res.setHeader('Connection', 'keep-alive')
+export class SseController {
+  @Sse('comments')
+  streamComments(): Observable<any> {
+    // Heartbeat to keep connection alive
+    const heartbeat$ = interval(30000).pipe(
+      map(() => ({ data: { type: 'heartbeat' }, type: 'heartbeat' }))
+    )
     
-    return this.sseService.getEventStream()
+    // Merge comment stream with heartbeat
+    return merge(
+      this.sseService.getCommentStream(),
+      heartbeat$
+    )
   }
 }
 ```
@@ -289,12 +318,19 @@ export class SSEController {
 **Response:**
 ```json
 {
-  "status": "ok",
-  "timestamp": "2026-03-26T10:30:00Z",
-  "uptime": 3600,
-  "commentsProcessed": 1523,
-  "activeConnections": 5,
-  "kafkaConnected": true
+  "status": "healthy",
+  "service": "api",
+  "statistics": {
+    "total": 1523,
+    "byTag": {
+      "positive": 456,
+      "negative": 123,
+      "neutral": 789,
+      "unrelated": 155
+    },
+    "recentCount": 234
+  },
+  "timestamp": "2026-03-26T10:30:00.000Z"
 }
 ```
 
@@ -334,20 +370,17 @@ this.sseService.emitComment(comment)
 
 2. API's Kafka consumer receives message
 
-3. API saves to database:
-   ```sql
-   INSERT INTO comments ...
-   ```
-
-4. API emits SSE event:
+3. API emits SSE event:
    ```
    event: comment
    data: {"commentId":"abc",...}
    ```
 
-5. All connected browsers receive event
+4. All connected browsers receive event
 
-6. Dashboard updates UI in real-time
+5. Dashboard updates UI in real-time
+
+**Note:** API does not save to database. The consumer service already persisted the comment. API only streams via SSE for real-time updates.
 
 ### CORS Configuration
 
@@ -355,8 +388,8 @@ this.sseService.emitComment(comment)
 
 ```typescript
 app.enableCors({
-  origin: 'http://localhost:3000',
-  credentials: true
+  origin: process.env.API_CORS_ORIGIN || 'http://localhost:3000',
+  credentials: true,
 })
 ```
 
@@ -373,24 +406,35 @@ app.enableCors({
 async function bootstrap() {
   const app = await NestFactory.create(AppModule)
   
-  // HTTP server for REST + SSE
-  app.enableCors()
-  await app.listen(3001)
+  // Enable CORS for dashboard
+  app.enableCors({
+    origin: process.env.API_CORS_ORIGIN || 'http://localhost:3000',
+    credentials: true,
+  })
   
-  // Kafka consumer for processed-comments
+  // Add Kafka microservice
   app.connectMicroservice<MicroserviceOptions>({
     transport: Transport.KAFKA,
     options: {
       client: {
-        brokers: [KAFKA_BROKER]
+        clientId: process.env.KAFKA_CLIENT_ID || 'api',
+        brokers: [process.env.KAFKA_BROKER || 'localhost:9092'],
       },
       consumer: {
-        groupId: 'api-service-consumer'
-      }
-    }
+        groupId: KAFKA_CONSUMER_GROUPS.API,
+        sessionTimeout: 30000,
+        heartbeatInterval: 3000,
+      },
+      subscribe: {
+        fromBeginning: false, // Only new messages for API service
+      },
+    },
   })
   
   await app.startAllMicroservices()
+  
+  const port = process.env.API_PORT || 3001
+  await app.listen(port)
 }
 ```
 
@@ -419,12 +463,12 @@ async function bootstrap() {
 
 **Logs:**
 ```
-[API] Kafka consumer connected to processed-comments
-[API] Received processed comment: abc-123
-[API] Saved comment to database: abc-123
-[API] Emitted SSE event: comment
-[API] New SSE connection from ::ffff:127.0.0.1
-[API] SSE connection closed
+[API] Kafka consumer microservice started
+[API] Subscribed to topic: processed-comments
+[API] API service is running on: http://localhost:3001
+[API] Received processed comment: abc-123... [positive]
+[API] New SSE client connected
+[API] Emitted SSE event for comment: abc-123...
 ```
 
 **Metrics:**
@@ -487,11 +531,11 @@ docker exec -it kafka-broker kafka-console-producer.sh \
   --bootstrap-server localhost:9092 \
   --topic processed-comments
 
-# Type JSON:
-{"commentId":"test","text":"Test","tag":"positive","source":"twitter","processedAt":"2026-03-26T10:00:00Z","retryCount":0}
+# Type JSON (matching what consumer service publishes):
+{"id":1,"commentId":"test","text":"Test","textHash":"abc123","tag":"positive","source":"twitter","processedAt":"2026-03-26T10:00:00Z","consumerId":"test-consumer","retryCount":0}
 
-# Check API logs - should see "Received processed comment: test"
-# Check SSE stream - should emit event
+# Check API logs - should see "Received processed comment: test..."
+# Check SSE stream - should emit event to connected clients
 ```
 
 ## Next Steps

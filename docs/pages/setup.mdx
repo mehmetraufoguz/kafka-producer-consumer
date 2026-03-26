@@ -26,7 +26,7 @@
 **Configuration:**
 - 3 partitions per topic for parallel processing
 - Topics: `raw-comments`, `processed-comments`, `retry-queue`, `dead-letter-queue`
-- Port: 9092 (internal), 9093 (external)
+- Port: 9092 (broker/PLAINTEXT), 9093 (controller/KRaft)
 
 #### NestJS 10 with TypeScript
 
@@ -62,7 +62,7 @@ processed_comments (
   id: serial PRIMARY KEY,
   commentId: varchar (UUID, UNIQUE, INDEXED),
   text: text,
-  textHash: varchar(64, INDEXED),  -- SHA256 hash for sentiment caching
+  textHash: varchar (INDEXED),  -- SHA256 hash for sentiment caching
   tag: varchar (positive/negative/neutral/unrelated, INDEXED),
   source: varchar (twitter/instagram/facebook/tiktok),
   processedAt: timestamp (INDEXED),
@@ -84,8 +84,8 @@ processed_comments (
 - Persistence across service restarts
 
 **Data stored:**
-- Comment hash → timestamp
-- Used by consumer to detect duplicates
+- `processed:{commentId}` → `'1'` (presence flag, 3-hour TTL)
+- Used by consumer to detect duplicate comment submissions
 
 #### gRPC with @grpc/grpc-js
 
@@ -122,9 +122,8 @@ processed_comments (
 - Used for: `/` and `/comments` pages
 
 **TanStack Query:**
-- Data fetching and caching
-- Automatic refetching (10 second interval)
-- Used for: API calls to `/api/comments` and `/api/statistics`
+- Set up as a provider (part of TanStack Start framework template)
+- Not actively used for data fetching — all data comes from TanStack DB collection
 
 **TanStack Table:**
 - Headless table library
@@ -138,12 +137,11 @@ processed_comments (
 **Implementation:**
 ```tsx
 const table = useReactTable({
-  data: comments,
+  data: filteredComments, // pre-filtered via useLiveQuery + useMemo
   columns,
   getCoreRowModel: getCoreRowModel(),
   getPaginationRowModel: getPaginationRowModel(),
   getSortedRowModel: getSortedRowModel(),
-  getFilteredRowModel: getFilteredRowModel(),
 })
 ```
 
@@ -215,6 +213,7 @@ const table = useReactTable({
 - kafka (apache/kafka:4.0.2)
 - postgres (postgres:17)
 - redis (redis:7.2)
+- kafka-ui (provectuslabs/kafka-ui)
 - producer, consumer, sentiment, api, dashboard
 
 #### pnpm Workspaces
@@ -311,10 +310,8 @@ pnpm docker:up
 # Start infrastructure only
 docker compose up -d postgres redis kafka
 
-# Run migrations
-cd consumer && pnpm run migration:run && cd ..
-
 # Start all services in watch mode
+# TypeORM synchronize:true auto-creates tables on startup
 pnpm dev:all
 ```
 
@@ -328,7 +325,7 @@ pnpm dev:all
 | Statistics | http://localhost:3001/api/statistics | Aggregate data |
 | SSE Stream | http://localhost:3001/api/sse/comments | Real-time events |
 | Sentiment Health | http://localhost:3005/health | gRPC service status |
-
+| Kafka UI | http://localhost:8080 | Kafka topic browser |
 ## Verification
 
 ### 1. Check Kafka
@@ -340,7 +337,7 @@ docker ps | grep kafka
 ### 2. Check Database
 ```bash
 docker exec kafka-postgres psql -U postgres -d restaurant_comments -c "\dt"
-# Should show "comments" table
+# Should show "processed_comments" table
 ```
 
 ### 3. Check Redis
@@ -372,14 +369,14 @@ Open http://localhost:3000 and watch for:
 
 **Database connection failed:**
 - Ensure PostgreSQL container is running
-- Run migrations: `cd consumer && pnpm run migration:run`
+- TypeORM `synchronize: true` creates tables automatically on startup
 
 **@repo/shared not found:**
 - Run `pnpm --filter shared build`
 - Check `shared/dist/` folder exists
 
 **Port conflicts:**
-- Ensure ports 3000, 3001, 3004, 5432, 6379, 9092 are free
+- Ensure ports 3000, 3001, 3004, 3005, 5432, 6379, 8080, 9092 are free
 - Check with: `lsof -i :PORT_NUMBER`
 
 ## Next Steps
