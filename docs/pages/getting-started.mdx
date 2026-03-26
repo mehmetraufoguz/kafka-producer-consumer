@@ -110,25 +110,29 @@ The platform follows an event-driven architecture where data flows through multi
 
 **What happens:**
 - API service subscribes to `processed-comments`
-- Updates in-memory statistics
-- Broadcasts via SSE to connected clients
+- Saves comment to PostgreSQL database
+- Broadcasts comment via SSE to connected clients
 
 **Why:**
 - API doesn't need to poll database
 - Real-time updates to dashboard
-- Statistics calculated on-the-fly
+- Decoupled from consumer service
 
 ### 8. Dashboard Receives Updates
 
 **What happens:**
 - Browser maintains SSE connection to API
-- Receives two event types: `comment` and `statistics`
-- Updates Zustand stores
-- Re-renders table and charts automatically
+- Receives `comment` events from the stream
+- Validates comment data with Zod schema
+- Inserts into TanStack DB collection (auto-persists to localStorage)
+- Components using `useLiveQuery` automatically re-render
+- Statistics computed on-the-fly from the collection
 
 **Why:**
 - SSE simpler than WebSockets for one-way updates
-- Zustand keeps UI reactive
+- TanStack DB provides reactive queries without manual state management
+- localStorage persistence enables offline support
+- Computing statistics from collection ensures data consistency
 - No manual polling needed
 
 ## Error Handling Flow

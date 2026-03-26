@@ -2,14 +2,14 @@
 
 ## Overview
 
-The API service is a hybrid NestJS application that acts as both an HTTP server (REST endpoints) and a Kafka consumer. It consumes processed comments from Kafka, stores them in memory, serves them via REST API, and broadcasts updates in real-time using Server-Sent Events (SSE).
+The API service is a hybrid NestJS application that acts as both an HTTP server (REST endpoints) and a Kafka consumer. It consumes processed comments from Kafka, stores them in PostgreSQL, serves them via REST API, and broadcasts new comments in real-time using Server-Sent Events (SSE).
 
 ## Purpose
 
 - Provide REST endpoints for dashboard data fetching
-- Stream real-time updates via Server-Sent Events
+- Stream real-time comment updates via Server-Sent Events
 - Consume `processed-comments` from Kafka
-- Calculate aggregate statistics
+- Calculate aggregate statistics (for REST endpoint)
 - Bridge between backend processing and frontend UI
 
 ## Architecture
@@ -69,10 +69,6 @@ export class KafkaConsumerService {
     
     // 2. Emit SSE event for real-time update
     this.sseService.emitComment(data)
-    
-    // 3. Update statistics
-    const statistics = await this.commentsService.getStatistics()
-    this.sseService.emitStatisticsUpdate(statistics)
   }
 }
 ```
@@ -191,13 +187,6 @@ export class SSEService {
       data: JSON.stringify(comment)
     })
   }
-
-  emitStatisticsUpdate(statistics: CommentStatistics): void {
-    this.eventSubject.next({
-      type: 'statistics',
-      data: JSON.stringify(statistics)
-    })
-  }
 }
 ```
 
@@ -279,9 +268,6 @@ GET /api/comments?page=2&pageSize=10&tag=positive&search=food
 event: comment
 data: {"commentId":"abc-123","text":"Great!","tag":"positive",...}
 
-event: statistics
-data: {"total":1524,"byTag":{...},"lastHour":235}
-
 event: comment
 data: {"commentId":"def-456","text":"Terrible!","tag":"negative",...}
 ```
@@ -302,7 +288,7 @@ export class SSEController {
 ```
 
 **SSE Format:**
-- `event: <type>` - Event type (comment or statistics)
+- `event: comment` - Comment event type
 - `data: <json>` - JSON payload
 - Empty line - Message separator
 
@@ -332,12 +318,7 @@ const eventSource = new EventSource('http://localhost:3001/api/sse/comments')
 
 eventSource.addEventListener('comment', (event) => {
   const comment = JSON.parse(event.data)
-  // Update UI with new comment
-})
-
-eventSource.addEventListener('statistics', (event) => {
-  const statistics = JSON.parse(event.data)
-  // Update statistics display
+  // Validate with schema and insert into TanStack DB collection
 })
 
 eventSource.onerror = () => {
@@ -349,10 +330,6 @@ eventSource.onerror = () => {
 ```typescript
 // When comment processed:
 this.sseService.emitComment(comment)
-// → Sent to all connected clients
-
-// When statistics calculated:
-this.sseService.emitStatisticsUpdate(statistics)
 // → Sent to all connected clients
 ```
 
@@ -456,7 +433,6 @@ async function bootstrap() {
 [API] Received processed comment: abc-123
 [API] Saved comment to database: abc-123
 [API] Emitted SSE event: comment
-[API] Emitted SSE event: statistics
 [API] New SSE connection from ::ffff:127.0.0.1
 [API] SSE connection closed
 ```

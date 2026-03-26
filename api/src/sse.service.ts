@@ -20,14 +20,4 @@ export class SseService {
     this.commentSubject.next(event)
     this.logger.debug(`Emitted SSE event for comment: ${comment.commentId.substring(0, 8)}...`)
   }
-
-  emitStatisticsUpdate(statistics: any): void {
-    const event: MessageEvent = {
-      data: statistics,
-      type: 'statistics',
-    }
-    
-    this.commentSubject.next(event)
-    this.logger.debug('Emitted SSE event for statistics update')
-  }
 }

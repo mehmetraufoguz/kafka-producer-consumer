@@ -27,10 +27,6 @@ export class KafkaConsumerService {
       // Emit to SSE clients
       this.sseService.emitComment(saved)
 
-      // Also emit updated statistics
-      const statistics = await this.commentsService.getStatistics()
-      this.sseService.emitStatisticsUpdate(statistics)
-
     } catch (error) {
       this.logger.error(`Error handling processed comment: ${error.message}`, error.stack)
     }

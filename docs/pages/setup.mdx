@@ -145,19 +145,23 @@ const table = useReactTable({
 })
 ```
 
-#### Zustand
+#### TanStack DB
 
 **What it is:**
-- Lightweight state management
+- Client-side reactive database with localStorage backend
 
 **Why we use it:**
-- Simpler than Redux
-- No boilerplate
-- Works well with SSE updates
+- Automatic persistence to localStorage
+- Reactive live queries (components auto-update)
+- Schema validation with Zod
+- Cross-tab synchronization
+- No manual state management needed
 
-**Stores:**
-- `useCommentStore`: Holds last 100 real-time comments
-- `useStatisticsStore`: Holds aggregate statistics
+**Key Features:**
+- SQL-like query syntax
+- Type-safe operations
+- Built-in caching and persistence
+- Offline support
 
 #### Recharts
 

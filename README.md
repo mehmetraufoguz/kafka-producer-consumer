@@ -98,8 +98,7 @@ pnpm docker:up
 
 **Frontend**
 - React 19
-- TanStack Router/Query/Table
-- Zustand for state management
+- TanStack Router/Query/Table/DB
 - Recharts for visualization
 - shadcn/ui components
 - Tailwind CSS 4
@@ -133,14 +132,14 @@ Generates mock restaurant comments with 40+ templates, multiple sources, variabl
 ### Consumer (Standalone)
 Processes comments through Redis deduplication, LRU cache, gRPC sentiment analysis, PostgreSQL storage, with retry and DLQ routing.
 
-### Sentiment (Port 3004)
-gRPC service with consumer registration, sentiment classification, rate limiting (100/sec auth, 10/sec unauth), LRU cache, and random failures.
+### Sentiment (gRPC 3004, HTTP 3005)
+gRPC service for sentiment analysis with HTTP health endpoints. Features: consumer registration, keyword-based classification, rate limiting (100/sec auth, 10/sec unauth), LRU cache (500 entries), and random failure simulation (1/32).
 
 ### API (Port 3001)
 HTTP + Kafka hybrid: `/api/comments` (paginated), `/api/statistics`, `/api/sse/comments` (real-time), `/health`.
 
 ### Dashboard (Port 3000)
-React app with live statistics, charts, comments table with filtering/search, and real-time SSE updates.
+React app with TanStack DB for client-side storage, live statistics computed from collection, charts (pie/bar), comments table with filtering/search, and real-time SSE updates. localStorage persistence with cross-tab sync.
 
 ## Development
 

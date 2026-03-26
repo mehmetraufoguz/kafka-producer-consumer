@@ -2,7 +2,11 @@
 
 ## Overview
 
-The Sentiment service is a gRPC-based microservice that analyzes comment text and classifies it into one of four categories: positive, negative, neutral, or unrelated. It includes consumer registration, rate limiting, caching, and intentional failure simulation.
+The Sentiment service is a **hybrid HTTP + gRPC microservice** that analyzes comment text and classifies it into one of four categories: positive, negative, neutral, or unrelated. It includes consumer registration, rate limiting, caching, and intentional failure simulation.
+
+**Dual Protocol Support:**
+- **gRPC (Port 3004)**: Primary interface for sentiment analysis and consumer registration
+- **HTTP (Port 3005)**: Health checks, monitoring, and statistics endpoints
 
 ## Purpose
 
@@ -11,37 +15,51 @@ The Sentiment service is a gRPC-based microservice that analyzes comment text an
 - Enforce rate limits (100/sec auth, 10/sec unauth)
 - Cache results to reduce redundant analysis
 - Simulate real-world service failures
+- Expose health and monitoring endpoints via HTTP
 
 ## Architecture
 
 ```
-┌─────────────────────────┐
-│   gRPC Server (3004)    │
-└───────────┬─────────────┘
-            │
-    ┌───────┴────────┐
-    │                │
-    ▼                ▼
-┌─────────┐   ┌──────────────┐
-│Register │   │ Analyze      │
-│Consumer │   │ Sentiment    │
-└─────────┘   └──────┬───────┘
-                     │
-            ┌────────┴────────┐
-            │                 │
-            ▼                 ▼
-    ┌───────────┐     ┌──────────────┐
-    │   Rate    │     │   LRU Cache  │
-    │  Limiter  │     │  (500 items) │
-    └───────────┘     └──────────────┘
-            │                 │
-            └────────┬────────┘
-                     ▼
-           ┌──────────────────┐
-           │  Keyword Matcher │
-           │  (classification)│
-           └──────────────────┘
+┌─────────────────────────────────────────────┐
+│         Sentiment Service                   │
+│                                             │
+│  ┌──────────────┐      ┌──────────────┐   │
+│  │ HTTP Server  │      │ gRPC Server  │   │
+│  │ (Port 3005)  │      │ (Port 3004)  │   │
+│  └──────┬───────┘      └──────┬───────┘   │
+│         │                     │            │
+│         ▼                     │            │
+│  ┌─────────────┐      ┌───────┴────────┐  │
+│  │   Health    │      │    Register    │  │
+│  │  Endpoint   │      │    Consumer    │  │
+│  │   /health   │      └────────────────┘  │
+│  └─────────────┘              │            │
+│                                │            │
+│                        ┌───────┴────────┐  │
+│                        │    Analyze     │  │
+│                        │   Sentiment    │  │
+│                        └───────┬────────┘  │
+│                                │            │
+│                   ┌────────────┴────────┐  │
+│                   │                     │  │
+│                   ▼                     ▼  │
+│           ┌───────────┐         ┌──────────────┐
+│           │   Rate    │         │   LRU Cache  │
+│           │  Limiter  │         │  (500 items) │
+│           └───────────┘         └──────────────┘
+│                   │                     │  │
+│                   └────────┬────────────┘  │
+│                            ▼               │
+│                  ┌──────────────────┐     │
+│                  │  Keyword Matcher │     │
+│                  │ (classification) │     │
+│                  └──────────────────┘     │
+└─────────────────────────────────────────────┘
 ```
+
+**Port Assignment:**
+- **3004**: gRPC service (sentiment analysis, registration)
+- **3005**: HTTP service (health checks, monitoring)
 
 ## gRPC Service Definition
 
@@ -381,29 +399,89 @@ Request 12-21: Accepted
 gRPC error: code=RESOURCE_EXHAUSTED, message="Rate limit exceeded"
 ```
 
-## HTTP Health Endpoint
+## HTTP Endpoints
 
-**Endpoint:** `GET http://localhost:3005/health`
+The sentiment service runs both HTTP and gRPC servers simultaneously on different ports.
+
+### Health Endpoint
+
+**URL:** `GET http://localhost:3005/health`
+
+**Purpose:**
+- Service health monitoring
+- Aggregated statistics from all internal services
+- Container readiness/liveness probes
+- Debugging and observability
 
 **Response:**
 ```json
 {
-  "status": "ok",
-  "timestamp": "2026-03-26T10:30:00Z",
-  "uptime": 3600,
-  "registeredConsumers": 2,
-  "cacheSize": 245,
-  "rateLimit": {
-    "authenticated": 100,
-    "unauthenticated": 10
-  }
+  "status": "healthy",
+  "service": "sentiment-grpc",
+  "cache": {
+    "size": 245,
+    "maxSize": 500,
+    "hitRate": 0.38
+  },
+  "rateLimiter": {
+    "authenticatedLimit": 100,
+    "unauthenticatedLimit": 10,
+    "activeConsumers": 3
+  },
+  "registration": {
+    "totalRegistered": 2,
+    "consumers": [
+      {
+        "id": "a1b2c3d4...",
+        "name": "consumer-service",
+        "registeredAt": "2026-03-26T10:00:00Z"
+      }
+    ]
+  },
+  "timestamp": "2026-03-26T10:30:00Z"
 }
 ```
 
-**Why HTTP health check:**
-- gRPC harder to curl/monitor
-- Standard for container health checks
-- Exposes useful metrics
+**Aggregated Metrics:**
+- **Cache stats**: Current size, capacity, hit rate
+- **Rate limiter stats**: Active limits, consumer count
+- **Registration stats**: All registered consumers with timestamps
+- **Service status**: Overall health indicator
+
+**Why use HTTP instead of gRPC:**
+- Easy to test with curl/Postman
+- Standard for Docker/Kubernetes health checks
+- Human-readable JSON output
+- No proto compilation needed for monitoring
+
+**Docker Healthcheck:**
+```yaml
+healthcheck:
+  test: ["CMD", "curl", "-f", "http://localhost:3005/health"]
+  interval: 10s
+  timeout: 5s
+  retries: 3
+```
+
+### Hybrid Architecture Benefits
+
+**gRPC for Core Business Logic:**
+- High performance binary protocol
+- Type-safe service contracts
+- Streaming support (if needed later)
+- Efficient for service-to-service calls
+
+**HTTP for Operations:**
+- Easy monitoring and debugging
+- Standard healthcheck protocols
+- Browser-accessible endpoints
+- No special client tooling needed
+
+**Single Process, Dual Protocols:**
+- Both servers run in same NestJS application
+- Shared service layer (cache, rate limiter, registration)
+- Different ports prevent confusion
+- Minimal overhead
 
 ## Performance Characteristics
 
